@@ -1,0 +1,10 @@
+{
+  "description": "Streamline crowd management with an intuitive user panel that enhances organization and efficiency, transforming chaotic queues into structured experiences.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
