@@ -43,7 +43,7 @@ export default function Analytics() {
   // Format counter utilization data from backend API
   const utilData = counters.map((c) => ({
     name: c.name,
-    util: c.utilizationPercent ?? 0,
+    util: typeof c.utilizationPercent === 'number' ? c.utilizationPercent : null,
     served: c.served || 0,
   }));
 
@@ -133,32 +133,56 @@ export default function Analytics() {
             {/* Counter Utilization Chart */}
             <div className="q-card" style={{ padding: '20px' }}>
               <h3 style={{ fontSize: '15px', fontWeight: 700, color: '#1c1917', marginBottom: '2px' }}>
-                Counter Service Delivery
+                Counter Utilization
               </h3>
               <p style={{ fontSize: '12px', color: '#a8a29e', marginBottom: '16px' }}>
-                Total tokens served today by each counter
+                Capacity utilization percentage per counter
               </p>
 
               {utilData.length === 0 ? (
                 <EmptyState title="No counter activity" description="Counters will display here once operational." />
+              ) : utilData.every((d) => d.util === null) ? (
+                <EmptyState title="Utilization unavailable" description="Counter utilization metrics are currently unavailable." />
               ) : (
-                <div style={{ width: '100%', height: '220px' }}>
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={utilData} margin={{ top: 8, right: 12, left: -20, bottom: 0 }}>
-                      <XAxis dataKey="name" tick={{ fontSize: 10, fill: '#a8a29e', fontFamily: 'JetBrains Mono' }} axisLine={false} tickLine={false} />
-                      <YAxis tick={{ fontSize: 10, fill: '#a8a29e', fontFamily: 'JetBrains Mono' }} axisLine={false} tickLine={false} />
-                      <Tooltip
-                        contentStyle={{ background: '#ffffff', border: '1px solid #f0ede8', borderRadius: 12, fontSize: 12, boxShadow: 'var(--shadow-md)' }}
-                        formatter={(val) => [`${val} served`, 'Tokens Served']}
-                      />
-                      <Bar dataKey="served" radius={[6, 6, 0, 0]}>
-                        {utilData.map((d, i) => (
-                          <Cell key={i} fill={d.served > 20 ? '#22c55e' : d.served > 10 ? '#f97316' : '#f59e0b'} />
-                        ))}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
+                <>
+                  <div style={{ width: '100%', height: '220px' }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={utilData} margin={{ top: 8, right: 12, left: -20, bottom: 0 }}>
+                        <XAxis dataKey="name" tick={{ fontSize: 10, fill: '#a8a29e', fontFamily: 'JetBrains Mono' }} axisLine={false} tickLine={false} />
+                        <YAxis domain={[0, 100]} unit="%" tick={{ fontSize: 10, fill: '#a8a29e', fontFamily: 'JetBrains Mono' }} axisLine={false} tickLine={false} />
+                        <Tooltip
+                          contentStyle={{ background: '#ffffff', border: '1px solid #f0ede8', borderRadius: 12, fontSize: 12, boxShadow: 'var(--shadow-md)' }}
+                          formatter={(val) => [
+                            val !== null && val !== undefined ? `${val}% utilization` : 'Utilization unavailable',
+                            'Utilization'
+                          ]}
+                        />
+                        <Bar dataKey="util" radius={[6, 6, 0, 0]}>
+                          {utilData.map((d, i) => (
+                            <Cell key={i} fill={d.util !== null ? (d.util > 70 ? '#22c55e' : d.util > 30 ? '#f97316' : '#3b82f6') : 'transparent'} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div style={{ marginTop: '12px', display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                    {utilData.map((d, i) => (
+                      <span
+                        key={i}
+                        style={{
+                          fontSize: '11px',
+                          padding: '3px 8px',
+                          borderRadius: '6px',
+                          background: '#faf9f6',
+                          border: '1px solid #f0ede8',
+                          color: d.util !== null ? '#44403c' : '#a8a29e',
+                        }}
+                      >
+                        {d.name}: {d.util !== null ? `${d.util}% utilization` : 'Utilization unavailable'}
+                      </span>
+                    ))}
+                  </div>
+                </>
               )}
             </div>
 
@@ -192,13 +216,13 @@ export default function Analytics() {
               )}
             </div>
 
-            {/* Queue Wait Time Table */}
+            {/* Average Service Time Section */}
             <div className="q-card" style={{ padding: '20px' }}>
               <h3 style={{ fontSize: '15px', fontWeight: 700, color: '#1c1917', marginBottom: '2px' }}>
-                Service Wait Times & Estimates
+                Average Service Time
               </h3>
               <p style={{ fontSize: '12px', color: '#a8a29e', marginBottom: '16px' }}>
-                Live waiting counts and duration averages
+                Average service duration per completed token by service category
               </p>
 
               {analytics.queues?.length === 0 ? (

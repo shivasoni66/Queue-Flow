@@ -1,11 +1,50 @@
+# Environment variables and credentials
+.env
+.env.*
+.env*.local
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
+id_rsa
+*.p8
+*.p12
+
+# Node dependencies
 node_modules/
 backend/node_modules/
 admin_panel/node_modules/
-backend/.env
-admin_panel/.env
-admin_panel/.env.local
-admin_panel/.env.*.local
+*/node_modules/
+
+# Production and build outputs
+dist/
 admin_panel/dist/
+*/dist/
+build/
+*/build/
+out/
+coverage/
+
+# Flutter / Dart
+.dart_tool/
+.packages
+.pub/
+.pub-cache/
+
+# Logs and debug artifacts
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE, editor and OS metadata
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
 .DS_Store
 Thumbs.db

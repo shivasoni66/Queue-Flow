@@ -32,7 +32,7 @@ export default function QueueTable({ queues = [] }) {
                 <th style={{ padding: '12px 16px', fontWeight: 600 }}>WAITING</th>
                 <th style={{ padding: '12px 16px', fontWeight: 600 }}>SERVED</th>
                 <th style={{ padding: '12px 16px', fontWeight: 600 }}>TOTAL ISSUED</th>
-                <th style={{ padding: '12px 16px', fontWeight: 600 }}>AVG WAIT / TIME</th>
+                <th style={{ padding: '12px 16px', fontWeight: 600 }}>AVG SERVICE TIME</th>
                 <th style={{ padding: '12px 16px', fontWeight: 600 }}>STATUS</th>
               </tr>
             </thead>
