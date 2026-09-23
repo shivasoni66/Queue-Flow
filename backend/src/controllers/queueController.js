@@ -57,7 +57,9 @@ const getServiceQueue = asyncHandler(async (req, res) => {
  */
 const getRecentEvents = asyncHandler(async (req, res) => {
   const { centerId } = req.params;
-  const { limit = 20 } = req.query;
+  let limitNum = parseInt(req.query.limit, 10);
+  if (isNaN(limitNum) || limitNum < 1) limitNum = 20;
+  if (limitNum > 100) limitNum = 100;
 
   const QueueEvent = require('../models/QueueEvent');
   const events = await QueueEvent.find({ centerId })
@@ -65,7 +67,7 @@ const getRecentEvents = asyncHandler(async (req, res) => {
     .populate('counterId', 'name number')
     .populate('performedBy', 'name')
     .sort({ createdAt: -1 })
-    .limit(parseInt(limit))
+    .limit(limitNum)
     .lean();
 
   return sendSuccess(res, { data: { events } });

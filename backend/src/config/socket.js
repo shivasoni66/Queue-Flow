@@ -1,22 +1,147 @@
 'use strict';
 
 const { Server } = require('socket.io');
+const jwt = require('jsonwebtoken');
 
 let io;
+
+// ─── Validated MongoDB ObjectId format ────────────────────────────────────────
+const MONGO_ID_REGEX = /^[a-fA-F0-9]{24}$/;
+
+/**
+ * Safely extract a bearer token string from a value that may contain
+ * "Bearer <token>" or a bare token.
+ * Returns null if the value is empty or missing.
+ */
+function extractBearer(value) {
+  if (!value || typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.toLowerCase().startsWith('bearer ')) {
+    const t = trimmed.slice(7).trim();
+    return t || null;
+  }
+  return trimmed;
+}
+
+/**
+ * Socket.IO JWT authentication middleware.
+ *
+ * Extracts the token from:
+ *   1. socket.handshake.auth.token   (Flutter setAuth, preferred)
+ *   2. socket.handshake.headers.authorization  (extra header fallback)
+ *
+ * If BOTH are provided they MUST be identical; if they differ the connection
+ * is rejected to prevent confused-deputy attacks.
+ *
+ * Identity is derived ONLY from the verified JWT payload — never from any
+ * client-supplied userId, email, or role claim.
+ *
+ * On success:  socket.user = { id: '<24-hex-string>', role: '<ROLE>' }
+ * On failure:  next(Error) → connection rejected with an authentication error
+ *
+ * SECURITY:
+ *   - JWT secret is read from process.env.JWT_SECRET (same as REST middleware).
+ *   - Neither the raw token nor any decoded field is ever logged.
+ *   - Expired, tampered, and missing tokens are all rejected with the same
+ *     generic message to avoid information leakage.
+ */
+async function socketAuthMiddleware(socket, next) {
+  // ── Extract token ──────────────────────────────────────────────────────────
+  const authToken = extractBearer(socket.handshake.auth && socket.handshake.auth.token);
+  const headerToken = extractBearer(
+    socket.handshake.headers && socket.handshake.headers.authorization
+  );
+
+  // Choose the effective token; reject if both are supplied but different
+  let token;
+  if (authToken && headerToken) {
+    if (authToken !== headerToken) {
+      // Mismatched credentials — refuse rather than guess
+      return next(new Error('SOCKET_AUTH_MISMATCH'));
+    }
+    token = authToken;
+  } else {
+    token = authToken || headerToken;
+  }
+
+  if (!token) {
+    return next(new Error('SOCKET_AUTH_REQUIRED'));
+  }
+
+  // ── Verify token ───────────────────────────────────────────────────────────
+  let decoded;
+  try {
+    decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+  } catch (_err) {
+    // Covers: TokenExpiredError, JsonWebTokenError, NotBeforeError
+    // Generic message — do NOT reveal whether it was expired vs tampered.
+    return next(new Error('SOCKET_AUTH_INVALID'));
+  }
+
+  // ── Validate decoded payload ───────────────────────────────────────────────
+  if (!decoded || typeof decoded.id !== 'string' || !MONGO_ID_REGEX.test(decoded.id)) {
+    return next(new Error('SOCKET_AUTH_INVALID'));
+  }
+
+  // ── Validate user status and tokenVersion in database ───────────────────────
+  try {
+    const User = require('../models/User');
+    const user = await User.findById(decoded.id).select('role tokenVersion isActive');
+    if (user) {
+      if (user.isActive === false) {
+        return next(new Error('SOCKET_AUTH_INVALID'));
+      }
+      const currentVersion = user.tokenVersion !== undefined ? user.tokenVersion : 0;
+      if (typeof decoded.tokenVersion === 'number' && decoded.tokenVersion !== currentVersion) {
+        return next(new Error('SOCKET_AUTH_REVOKED'));
+      }
+    }
+  } catch (_) {
+    // Fail-open only for DB connectivity glitches, decoded token is cryptographically verified
+  }
+
+  // ── Attach minimum identity — DO NOT store raw JWT ─────────────────────────
+  // Role claim is validated against canonical enum ('CUSTOMER', 'STAFF', 'ADMIN').
+  // Unrecognized or omitted values safely default to 'CUSTOMER'.
+  const VALID_ROLES = ['CUSTOMER', 'STAFF', 'ADMIN'];
+  const rawRole = (typeof decoded.role === 'string' && decoded.role.trim().toUpperCase()) || '';
+  const role = VALID_ROLES.includes(rawRole) ? rawRole : 'CUSTOMER';
+
+  socket.user = {
+    id: decoded.id,
+    role,
+    tokenVersion: decoded.tokenVersion,
+  };
+
+  return next();
+}
 
 /**
  * Initialize the Socket.IO server.
  * Must be called once from server.js after the HTTP server is created.
  */
 function initSocket(httpServer) {
-  const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173')
-    .split(',')
-    .map((o) => o.trim());
+  const DEFAULT_ALLOWED_ORIGINS = [
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:5173',
+    'https://queue-flow-4308.onrender.com',
+  ];
+
+  const envOrigins = process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim().replace(/\/$/, '')).filter(Boolean)
+    : [];
+
+  const allowedOrigins = Array.from(new Set([...DEFAULT_ALLOWED_ORIGINS, ...envOrigins]));
 
   io = new Server(httpServer, {
     cors: {
       origin: (origin, callback) => {
-        if (!origin || allowedOrigins.includes(origin)) {
+        if (!origin) return callback(null, true);
+        const normalizedOrigin = origin.trim().replace(/\/$/, '');
+        if (allowedOrigins.includes(normalizedOrigin)) {
           callback(null, true);
         } else {
           callback(new Error(`Socket.IO CORS: Origin ${origin} not allowed`));
@@ -30,48 +155,91 @@ function initSocket(httpServer) {
     transports: ['websocket', 'polling'],
   });
 
-  io.on('connection', (socket) => {
-    console.log(`[Socket] Client connected: ${socket.id}`);
+  // ─── JWT authentication middleware ─────────────────────────────────────────
+  // Every incoming socket MUST carry a valid JWT. Unauthenticated connections
+  // are rejected before the 'connection' handler fires.
+  io.use(socketAuthMiddleware);
 
-    // ── Room subscriptions ──────────────────────────────────────
-    // Clients join a center room to receive all events for that center
+  io.on('connection', (socket) => {
+    // socket.user is guaranteed to exist here (set by socketAuthMiddleware).
+    console.log(`[Socket] Client authenticated: ${socket.id} (role: ${socket.user.role})`);
+
+    // Automatically join the authenticated user's private room.
+    // The room name is derived from the VERIFIED JWT identity — never from a
+    // client-supplied value.
+    socket.join(`user:${socket.user.id}`);
+
+    // ── Room subscriptions ────────────────────────────────────────────────────
+
+    // join:center — public / shared event channel for a service center.
+    // Any authenticated user may join a center room to receive queue-level
+    // broadcasts (queue.updated, token.called, counter.updated, crowd.updated).
+    // The centerId is validated to be a 24-hex MongoDB ObjectId before use.
     socket.on('join:center', (centerId) => {
-      if (!centerId) return;
-      socket.join(`center:${centerId}`);
-      console.log(`[Socket] ${socket.id} joined center:${centerId}`);
+      if (!centerId || typeof centerId !== 'string') return;
+      const id = centerId.trim();
+      if (!MONGO_ID_REGEX.test(id)) return; // Reject malformed / injection IDs
+      socket.join(`center:${id}`);
+      console.log(`[Socket] ${socket.id} joined center:${id}`);
     });
 
     socket.on('leave:center', (centerId) => {
-      if (!centerId) return;
-      socket.leave(`center:${centerId}`);
+      if (!centerId || typeof centerId !== 'string') return;
+      const id = centerId.trim();
+      if (!MONGO_ID_REGEX.test(id)) return;
+      socket.leave(`center:${id}`);
     });
 
-    // Clients join their personal room to receive user-specific notifications
-    socket.on('join:user', (userId) => {
-      if (!userId) return;
-      socket.join(`user:${userId}`);
-      console.log(`[Socket] ${socket.id} joined user:${userId}`);
+    // join:user — SECURE private room subscription.
+    //
+    // The server IGNORES the client-supplied userId and always joins the
+    // authenticated user's own room (derived from socket.user.id).
+    //
+    // This approach is backward-compatible with the Flutter client, which
+    // currently emits:  join:user(currentUserId)
+    //
+    // Cross-user attacks are structurally impossible:
+    //   • Customer A JWT  + join:user(B) → Customer A still only in user:A
+    //   • Customer A JWT  + join:user()  → Customer A still only in user:A
+    //
+    // The room join already happened unconditionally above on connection;
+    // this handler is retained for backward-compatibility with the Flutter
+    // client event, but it is now a no-op (the private room is already set).
+    socket.on('join:user', (_clientUserId) => {
+      // Nothing to do — the user room was joined at connection time using the
+      // verified JWT identity. The event is acknowledged silently to keep
+      // the Flutter client compatible without exposing any security boundary.
+      console.log(`[Socket] ${socket.id} user-room already joined (server-authoritative)`);
     });
 
-    socket.on('leave:user', (userId) => {
-      if (!userId) return;
-      socket.leave(`user:${userId}`);
+    socket.on('leave:user', (_userId) => {
+      // Clients may NOT leave their own private notification room.
+      // Silently ignore the request.
     });
 
-    // Counter display clients join a counter room
-    socket.on('join:counter', ({ centerId, counterId }) => {
+    // join:counter — display-board subscription for a counter kiosk.
+    // Requires authenticated socket; counter rooms receive counter.updated events.
+    socket.on('join:counter', ({ centerId, counterId } = {}) => {
       if (!centerId || !counterId) return;
-      socket.join(`counter:${centerId}:${counterId}`);
-      console.log(`[Socket] ${socket.id} joined counter:${centerId}:${counterId}`);
+      const cid = typeof centerId === 'string' ? centerId.trim() : '';
+      const ctid = typeof counterId === 'string' ? counterId.trim() : '';
+      if (!MONGO_ID_REGEX.test(cid) || !MONGO_ID_REGEX.test(ctid)) return;
+      socket.join(`counter:${cid}:${ctid}`);
+      console.log(`[Socket] ${socket.id} joined counter:${cid}:${ctid}`);
     });
 
-    socket.on('leave:counter', ({ centerId, counterId }) => {
+    socket.on('leave:counter', ({ centerId, counterId } = {}) => {
       if (!centerId || !counterId) return;
-      socket.leave(`counter:${centerId}:${counterId}`);
-      console.log(`[Socket] ${socket.id} left counter:${centerId}:${counterId}`);
+      const cid = typeof centerId === 'string' ? centerId.trim() : '';
+      const ctid = typeof counterId === 'string' ? counterId.trim() : '';
+      if (!MONGO_ID_REGEX.test(cid) || !MONGO_ID_REGEX.test(ctid)) return;
+      socket.leave(`counter:${cid}:${ctid}`);
+      console.log(`[Socket] ${socket.id} left counter:${cid}:${ctid}`);
     });
 
     socket.on('disconnect', (reason) => {
+      // Clear identity reference (belt-and-suspenders; Node GC would handle it)
+      socket.user = null;
       console.log(`[Socket] Client disconnected: ${socket.id} — ${reason}`);
     });
 
@@ -80,7 +248,7 @@ function initSocket(httpServer) {
     });
   });
 
-  console.log('[Socket] Socket.IO server initialized');
+  console.log('[Socket] Socket.IO server initialized with JWT authentication');
   return io;
 }
 
@@ -136,6 +304,22 @@ function broadcast(event, data) {
   getIO().emit(event, data);
 }
 
+/**
+ * Disconnect and revoke all active sockets for a specific user.
+ * Disconnects existing sockets in the user room and removes them.
+ * @param {string} userId
+ */
+function disconnectUserSockets(userId) {
+  if (!io || !userId) return;
+  try {
+    const userRoom = `user:${userId}`;
+    io.in(userRoom).disconnectSockets(true);
+    console.log(`[Socket] Revoked and disconnected all sockets for user ${userId}`);
+  } catch (err) {
+    console.error(`[Socket] Error revoking sockets for user ${userId}:`, err.message);
+  }
+}
+
 module.exports = {
   initSocket,
   getIO,
@@ -143,4 +327,5 @@ module.exports = {
   emitToUser,
   emitToCounter,
   broadcast,
+  disconnectUserSockets,
 };

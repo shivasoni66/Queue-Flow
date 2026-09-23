@@ -21,6 +21,18 @@ const joinValidation = [
   body('notifySms').optional().isBoolean(),
 ];
 
+const feedbackValidation = [
+  body('rating')
+    .custom((val) => typeof val === 'number' && Number.isInteger(val) && val >= 1 && val <= 5)
+    .withMessage('Rating must be an integer between 1 and 5'),
+  body('comment')
+    .optional({ nullable: true })
+    .isString()
+    .trim()
+    .isLength({ max: 500 })
+    .withMessage('Comment must not exceed 500 characters'),
+];
+
 // ─── Controllers ──────────────────────────────────
 
 /**
@@ -52,8 +64,8 @@ const create = asyncHandler(async (req, res) => {
       },
     });
   } catch (err) {
-    if (err.status === 409 && err.existingToken) {
-      return sendConflict(res, err.message);
+    if (err.status === 409 || err.code === 11000) {
+      return sendConflict(res, err.message || 'You already have an active token for this service at this center');
     }
     if (err.status === 404) {
       return sendNotFound(res, err.message);
@@ -70,14 +82,22 @@ const create = asyncHandler(async (req, res) => {
  * Get the authenticated user's active token(s).
  */
 const getMyTokens = asyncHandler(async (req, res) => {
-  const { status, limit = 10, page = 1 } = req.query;
+  let pageNum = parseInt(req.query.page, 10);
+  if (isNaN(pageNum) || pageNum < 1) pageNum = 1;
+
+  let limitNum = parseInt(req.query.limit, 10);
+  if (isNaN(limitNum) || limitNum < 1) limitNum = 10;
+  if (limitNum > 100) limitNum = 100;
 
   const filter = { userId: req.user._id };
-  if (status) {
-    filter.status = status.toUpperCase();
+  if (req.query.status && typeof req.query.status === 'string') {
+    const s = req.query.status.trim().toUpperCase();
+    if (['WAITING', 'CALLED', 'SERVING', 'COMPLETED', 'SKIPPED', 'CANCELLED', 'EXPIRED'].includes(s)) {
+      filter.status = s;
+    }
   }
 
-  const skip = (parseInt(page) - 1) * parseInt(limit);
+  const skip = (pageNum - 1) * limitNum;
   const total = await Token.countDocuments(filter);
 
   const tokens = await Token.find(filter)
@@ -86,16 +106,16 @@ const getMyTokens = asyncHandler(async (req, res) => {
     .populate('counterId', 'name number')
     .sort({ createdAt: -1 })
     .skip(skip)
-    .limit(parseInt(limit))
+    .limit(limitNum)
     .lean({ virtuals: true });
 
   return sendSuccess(res, {
     data: { tokens },
     meta: {
       total,
-      page: parseInt(page),
-      limit: parseInt(limit),
-      pages: Math.ceil(total / parseInt(limit)),
+      page: pageNum,
+      limit: limitNum,
+      pages: Math.ceil(total / limitNum) || 1,
     },
   });
 });
@@ -230,4 +250,5 @@ module.exports = {
   cancel,
   submitFeedback,
   joinValidation,
+  feedbackValidation,
 };

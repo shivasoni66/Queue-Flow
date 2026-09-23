@@ -14,6 +14,8 @@ const {
 } = require('../utils/apiResponse');
 const { emitToCenter, emitToCounter } = require('../config/socket');
 
+const { MONGO_ID_REGEX } = require('../middleware/validate');
+
 // ─── Validation ───────────────────────────────────
 const createValidation = [
   body('centerId').isMongoId().withMessage('Valid centerId is required'),
@@ -30,7 +32,12 @@ const createValidation = [
 const list = asyncHandler(async (req, res) => {
   const { centerId } = req.query;
   const filter = {};
-  if (centerId) filter.centerId = centerId;
+  if (centerId) {
+    if (typeof centerId !== 'string' || !MONGO_ID_REGEX.test(centerId)) {
+      return sendBadRequest(res, 'Invalid centerId');
+    }
+    filter.centerId = centerId;
+  }
 
   const counters = await Counter.find(filter)
     .populate('serviceId', 'name tokenPrefix')
@@ -121,6 +128,9 @@ const assignService = asyncHandler(async (req, res) => {
   const { serviceId } = req.body;
 
   if (serviceId) {
+    if (typeof serviceId !== 'string' || !MONGO_ID_REGEX.test(serviceId)) {
+      return sendBadRequest(res, 'Invalid serviceId');
+    }
     const service = await Service.findById(serviceId);
     if (!service) return sendNotFound(res, 'Service not found');
   }
@@ -227,6 +237,11 @@ const complete = asyncHandler(async (req, res) => {
  */
 const skip = asyncHandler(async (req, res) => {
   const { tokenId } = req.body;
+  if (tokenId) {
+    if (typeof tokenId !== 'string' || !MONGO_ID_REGEX.test(tokenId)) {
+      return sendBadRequest(res, 'Invalid tokenId');
+    }
+  }
   const counter = await Counter.findById(req.params.id);
   if (!counter) return sendNotFound(res, 'Counter not found');
 

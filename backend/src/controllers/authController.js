@@ -3,6 +3,7 @@
 const { body } = require('express-validator');
 const User = require('../models/User');
 const { signToken } = require('../middleware/auth');
+const { disconnectUserSockets } = require('../config/socket');
 const asyncHandler = require('../utils/asyncHandler');
 const {
   sendSuccess,
@@ -27,6 +28,21 @@ const registerValidation = [
 const loginValidation = [
   body('email').trim().isEmail().normalizeEmail().withMessage('Valid email is required'),
   body('password').notEmpty().withMessage('Password is required'),
+];
+
+const changePasswordValidation = [
+  body('currentPassword').notEmpty().withMessage('Current password is required'),
+  body('newPassword')
+    .isLength({ min: 8 })
+    .withMessage('Password must be at least 8 characters')
+    .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
+    .withMessage('Password must contain uppercase, lowercase, and a number'),
+];
+
+const updateMeValidation = [
+  body('name').optional().isString().trim().isLength({ min: 2, max: 80 }).withMessage('Name must be 2–80 characters'),
+  body('phone').optional({ nullable: true }).isString().trim().isLength({ max: 20 }).withMessage('Phone must not exceed 20 characters'),
+  body('fcmToken').optional({ nullable: true }).isString().trim().isLength({ max: 500 }).withMessage('fcmToken must not exceed 500 characters'),
 ];
 
 // ─── Controllers ──────────────────────────────────
@@ -54,7 +70,7 @@ const register = asyncHandler(async (req, res) => {
     role: 'CUSTOMER',
   });
 
-  const token = signToken(user._id.toString());
+  const token = signToken(user._id.toString(), user.role, user.tokenVersion || 0);
 
   return sendCreated(res, {
     message: 'Registration successful',
@@ -97,7 +113,7 @@ const login = asyncHandler(async (req, res) => {
   // Update last login time
   await User.findByIdAndUpdate(user._id, { lastLogin: new Date() });
 
-  const token = signToken(user._id.toString());
+  const token = signToken(user._id.toString(), user.role, user.tokenVersion || 0);
 
   return sendSuccess(res, {
     message: 'Login successful',
@@ -164,11 +180,56 @@ const updateMe = asyncHandler(async (req, res) => {
 
 /**
  * POST /api/auth/logout
- * Client-side logout (JWT is stateless; this just acknowledges).
- * For a full implementation, maintain a token blacklist or use short-lived tokens.
+ * Invalidate session by incrementing user's tokenVersion in MongoDB.
+ * Subsequent requests with this token will fail authentication.
  */
-const logout = asyncHandler(async (_req, res) => {
+const logout = asyncHandler(async (req, res) => {
+  if (req.user?._id) {
+    await User.findByIdAndUpdate(req.user._id, { $inc: { tokenVersion: 1 } });
+    disconnectUserSockets(req.user._id.toString());
+  }
   return sendSuccess(res, { message: 'Logged out successfully' });
+});
+
+/**
+ * POST /api/auth/change-password
+ * Updates password, increments tokenVersion to revoke all existing sessions,
+ * and returns a new valid JWT.
+ */
+const changePassword = asyncHandler(async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+
+  const user = await User.findById(req.user._id).select('+passwordHash');
+  if (!user) {
+    return sendUnauthorized(res, 'User account not found');
+  }
+
+  const isMatch = await user.comparePassword(currentPassword);
+  if (!isMatch) {
+    return sendUnauthorized(res, 'Current password is incorrect');
+  }
+
+  user.passwordHash = await User.hashPassword(newPassword);
+  user.tokenVersion = (user.tokenVersion || 0) + 1;
+  await user.save();
+  disconnectUserSockets(user._id.toString());
+
+  const token = signToken(user._id.toString(), user.role, user.tokenVersion);
+
+  return sendSuccess(res, {
+    message: 'Password changed successfully. All other sessions revoked.',
+    data: {
+      token,
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        preferences: user.preferences,
+      },
+    },
+  });
 });
 
 module.exports = {
@@ -177,6 +238,9 @@ module.exports = {
   getMe,
   updateMe,
   logout,
+  changePassword,
   registerValidation,
   loginValidation,
+  changePasswordValidation,
+  updateMeValidation,
 };

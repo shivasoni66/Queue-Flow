@@ -3,7 +3,7 @@
 const { body } = require('express-validator');
 const Service = require('../models/Service');
 const asyncHandler = require('../utils/asyncHandler');
-const { sendSuccess, sendCreated, sendNotFound } = require('../utils/apiResponse');
+const { sendSuccess, sendCreated, sendNotFound, sendBadRequest } = require('../utils/apiResponse');
 
 const createValidation = [
   body('centerId').isMongoId().withMessage('Valid centerId is required'),
@@ -11,6 +11,8 @@ const createValidation = [
   body('tokenPrefix').trim().notEmpty().isLength({ max: 3 }).withMessage('Token prefix is required'),
   body('avgServiceTimeMinutes').optional().isInt({ min: 1, max: 120 }).withMessage('Must be 1–120 minutes'),
 ];
+
+const { MONGO_ID_REGEX } = require('../middleware/validate');
 
 /**
  * GET /api/services?centerId=...
@@ -20,7 +22,12 @@ const listByCenter = asyncHandler(async (req, res) => {
   const { centerId } = req.query;
 
   const filter = { isActive: true };
-  if (centerId) filter.centerId = centerId;
+  if (centerId) {
+    if (typeof centerId !== 'string' || !MONGO_ID_REGEX.test(centerId)) {
+      return sendBadRequest(res, 'Invalid centerId');
+    }
+    filter.centerId = centerId;
+  }
 
   const services = await Service.find(filter).sort({ order: 1, name: 1 }).lean();
 

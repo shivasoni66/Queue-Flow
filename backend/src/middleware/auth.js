@@ -22,7 +22,7 @@ const protect = asyncHandler(async (req, res, next) => {
 
   let decoded;
   try {
-    decoded = jwt.verify(token, process.env.JWT_SECRET);
+    decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
       return sendUnauthorized(res, 'Token has expired. Please log in again.');
@@ -37,7 +37,17 @@ const protect = asyncHandler(async (req, res, next) => {
   }
 
   if (!user.isActive) {
-    return sendForbidden(res, 'Your account has been deactivated');
+    return sendUnauthorized(res, 'Your account has been deactivated');
+  }
+
+  // Token version verification: strict equality required.
+  // Missing, old, higher/future, or non-numeric tokenVersion must be rejected.
+  const currentVersion = user.tokenVersion !== undefined ? user.tokenVersion : 0;
+  if (
+    typeof decoded.tokenVersion !== 'number' ||
+    decoded.tokenVersion !== currentVersion
+  ) {
+    return sendUnauthorized(res, 'Session has expired or been revoked. Please log in again.');
   }
 
   req.user = user;
@@ -79,12 +89,20 @@ function iotSecret(req, res, next) {
 }
 
 /**
- * Sign a JWT token for a user.
+ * Sign a JWT token for a user with server-authoritative role claim and token version.
  * @param {string} userId - MongoDB ObjectId string
+ * @param {string} [role='CUSTOMER'] - User role (CUSTOMER, STAFF, ADMIN)
+ * @param {number} [tokenVersion=0] - Session token version for revocation
  * @returns {string} JWT
  */
-function signToken(userId) {
-  return jwt.sign({ id: userId }, process.env.JWT_SECRET, {
+function signToken(userId, role = 'CUSTOMER', tokenVersion = 0) {
+  const payload = {
+    id: userId,
+    role: (typeof role === 'string' && role) ? role : 'CUSTOMER',
+    tokenVersion: typeof tokenVersion === 'number' ? tokenVersion : 0,
+  };
+  return jwt.sign(payload, process.env.JWT_SECRET, {
+    algorithm: 'HS256',
     expiresIn: process.env.JWT_EXPIRES_IN || '7d',
   });
 }

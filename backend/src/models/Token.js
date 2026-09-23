@@ -117,9 +117,17 @@ tokenSchema.index({ userId: 1, status: 1 });
 tokenSchema.index({ userId: 1, createdAt: -1 });
 tokenSchema.index({ centerId: 1, createdAt: -1 });
 tokenSchema.index({ counterId: 1, status: 1 });
-tokenSchema.index({ tokenCode: 1, centerId: 1 });
-// Uniqueness: one tokenNumber per service queue per day
-// (handled in queueService via atomic increment on Queue doc)
+// Database-level concurrency guarantee: exactly one active token per user per service
+tokenSchema.index(
+  { userId: 1, centerId: 1, serviceId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      status: { $in: ['WAITING', 'CALLED', 'SERVING'] },
+    },
+    name: 'unique_active_user_token_per_service',
+  }
+);
 
 const Token = mongoose.model('Token', tokenSchema);
 

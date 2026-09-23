@@ -55,6 +55,10 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    tokenVersion: {
+      type: Number,
+      default: 0,
+    },
     lastLogin: {
       type: Date,
     },
@@ -85,6 +89,46 @@ userSchema.statics.hashPassword = async function (plainPassword) {
   const salt = await bcrypt.genSalt(12);
   return bcrypt.hash(plainPassword, salt);
 };
+
+// ─── Socket session revocation hooks ──────────────
+userSchema.post('save', function (doc) {
+  if (!doc || !doc._id) return;
+  if (
+    this.isModified('tokenVersion') ||
+    this.isModified('passwordHash') ||
+    this.isModified('isActive') ||
+    this.isModified('role')
+  ) {
+    try {
+      const { disconnectUserSockets } = require('../config/socket');
+      disconnectUserSockets(doc._id.toString());
+    } catch (_) {}
+  }
+});
+
+userSchema.post('findOneAndUpdate', function (doc) {
+  if (!doc || !doc._id) return;
+  const update = this.getUpdate();
+  if (!update) return;
+
+  const hasInvalidation =
+    (update.$inc && update.$inc.tokenVersion !== undefined) ||
+    update.tokenVersion !== undefined ||
+    (update.$set && update.$set.tokenVersion !== undefined) ||
+    update.passwordHash !== undefined ||
+    (update.$set && update.$set.passwordHash !== undefined) ||
+    update.isActive !== undefined ||
+    (update.$set && update.$set.isActive !== undefined) ||
+    update.role !== undefined ||
+    (update.$set && update.$set.role !== undefined);
+
+  if (hasInvalidation) {
+    try {
+      const { disconnectUserSockets } = require('../config/socket');
+      disconnectUserSockets(doc._id.toString());
+    } catch (_) {}
+  }
+});
 
 const User = mongoose.model('User', userSchema);
 

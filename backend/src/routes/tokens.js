@@ -1,21 +1,47 @@
 'use strict';
 
 const router = require('express').Router();
-const { protect, requireRole } = require('../middleware/auth');
-const validate = require('../middleware/validate');
+const rateLimit = require('express-rate-limit');
+const { protect } = require('../middleware/auth');
+const { validate, validateObjectId } = require('../middleware/validate');
 const {
-  create, getMyTokens, getActiveToken, getById, getQR, cancel, submitFeedback, joinValidation,
+  create,
+  getMyTokens,
+  getActiveToken,
+  getById,
+  getQR,
+  cancel,
+  submitFeedback,
+  joinValidation,
+  feedbackValidation,
 } = require('../controllers/tokenController');
+
+// Rate limiters for abuse-sensitive customer token operations
+const tokenCreateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: process.env.NODE_ENV === 'test' ? 10000 : 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many token requests, please try again later.' },
+});
+
+const feedbackLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: process.env.NODE_ENV === 'test' ? 10000 : 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many feedback submissions, please try again later.' },
+});
 
 // All token routes require authentication
 router.use(protect);
 
-router.post('/', joinValidation, validate, create);
+router.post('/', tokenCreateLimiter, joinValidation, validate, create);
 router.get('/my', getMyTokens);
 router.get('/active', getActiveToken);
-router.get('/:id', getById);
-router.get('/:id/qr', getQR);
-router.post('/:id/cancel', cancel);
-router.post('/:id/feedback', submitFeedback);
+router.get('/:id', validateObjectId('id'), getById);
+router.get('/:id/qr', validateObjectId('id'), getQR);
+router.post('/:id/cancel', validateObjectId('id'), cancel);
+router.post('/:id/feedback', validateObjectId('id'), feedbackLimiter, feedbackValidation, validate, submitFeedback);
 
 module.exports = router;

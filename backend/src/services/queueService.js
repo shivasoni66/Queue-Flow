@@ -13,6 +13,20 @@ const notificationService = require('./notificationService');
 const { emitToCenter, emitToUser, emitToCounter } = require('../config/socket');
 
 /**
+ * Sanitize a token payload before emitting to public center / counter rooms.
+ * Removes customer-identifying fields (userId) to ensure public queue displays
+ * and center listeners never receive customer ownership or PII.
+ *
+ * @param {object} token - Populated or plain token object
+ * @returns {object} Sanitized token object safe for public center broadcasts
+ */
+function _sanitizeTokenForCenter(token) {
+  if (!token || typeof token !== 'object') return token;
+  const { userId, ...safeToken } = token;
+  return safeToken;
+}
+
+/**
  * Get or create today's Queue document for a center+service pair.
  * Creates with default values if it does not exist.
  *
@@ -109,70 +123,180 @@ async function joinQueue({ userId, centerId, serviceId, notifyApp = true, notify
     throw err;
   }
 
-  // 3. Atomically increment the token number on the Queue doc
+  // 3. Atomically increment queue counters and create token inside a MongoDB transaction
   const date = getTodayDateString();
-  const queue = await Queue.findOneAndUpdate(
-    { centerId, serviceId, date },
-    {
-      $inc: { lastIssuedNumber: 1, totalIssued: 1, waitingCount: 1 },
-      $setOnInsert: {
-        centerId,
-        serviceId,
-        date,
-        status: 'OPEN',
-        completedCount: 0,
-        abandonedCount: 0,
-        activeCount: 0,
-      },
-    },
-    { new: true, upsert: true }
-  );
+  let token;
+  let queue;
+  let waitEstimate;
+  let tokenCode;
+  let position;
 
-  if (queue.status !== 'OPEN') {
-    // Roll back increment
-    await Queue.findByIdAndUpdate(queue._id, {
-      $inc: { lastIssuedNumber: -1, totalIssued: -1, waitingCount: -1 },
-    });
-    const err = new Error('This queue is currently not accepting new tokens');
-    err.status = 409;
-    throw err;
+  let session = null;
+  try {
+    session = await mongoose.startSession();
+  } catch (_) {
+    session = null;
   }
 
-  const tokenNumber = queue.lastIssuedNumber;
-  const tokenCode = formatTokenCode(service.tokenPrefix, tokenNumber);
+  if (session) {
+    try {
+      await session.withTransaction(async () => {
+        // Re-check for existing active token within transaction snapshot
+        const activeInTx = await Token.findOne({
+          userId,
+          centerId,
+          serviceId,
+          status: { $in: ['WAITING', 'CALLED', 'SERVING'] },
+        }).session(session);
 
-  // 4. Calculate wait estimate
-  const waitEstimate = await waitTimeService.estimateWait({
-    centerId,
-    serviceId,
-    queue,
-    service,
-  });
+        if (activeInTx) {
+          const err = new Error('You already have an active token for this service at this center');
+          err.status = 409;
+          err.existingToken = activeInTx;
+          throw err;
+        }
 
-  // 5. Calculate initial position (= current waiting count before this token)
-  const position = queue.waitingCount; // After increment, this token is at the end
+        queue = await Queue.findOneAndUpdate(
+          { centerId, serviceId, date },
+          {
+            $inc: { lastIssuedNumber: 1, totalIssued: 1, waitingCount: 1 },
+            $setOnInsert: {
+              centerId,
+              serviceId,
+              date,
+              status: 'OPEN',
+              completedCount: 0,
+              abandonedCount: 0,
+              activeCount: 0,
+            },
+          },
+          { new: true, upsert: true, session }
+        );
 
-  // 6. Create the token document
-  const qrData = generateQRData('pending', tokenCode, centerId.toString());
+        if (queue.status !== 'OPEN') {
+          const err = new Error('This queue is currently not accepting new tokens');
+          err.status = 409;
+          throw err;
+        }
 
-  const token = await Token.create({
-    tokenCode,
-    tokenNumber,
-    userId,
-    centerId,
-    serviceId,
-    status: 'WAITING',
-    initialPosition: position,
-    currentPosition: position,
-    waitEstimateMinutes: waitEstimate,
-    qrData, // Will update after save with real ID
-    notifyApp,
-    notifySms,
-  });
+        const tokenNumber = queue.lastIssuedNumber;
+        tokenCode = formatTokenCode(service.tokenPrefix, tokenNumber);
 
-  // 7. Update QR data with real token ID
-  token.qrData = generateQRData(token._id.toString(), tokenCode, centerId.toString());
-  await token.save();
+        waitEstimate = await waitTimeService.estimateWait({
+          centerId,
+          serviceId,
+          queue,
+          service,
+        });
+
+        position = queue.waitingCount;
+        const qrData = generateQRData('pending', tokenCode, centerId.toString());
+
+        const [created] = await Token.create(
+          [
+            {
+              tokenCode,
+              tokenNumber,
+              userId,
+              centerId,
+              serviceId,
+              status: 'WAITING',
+              initialPosition: position,
+              currentPosition: position,
+              waitEstimateMinutes: waitEstimate,
+              qrData,
+              notifyApp,
+              notifySms,
+            },
+          ],
+          { session }
+        );
+
+        created.qrData = generateQRData(created._id.toString(), tokenCode, centerId.toString());
+        await created.save({ session });
+        token = created;
+      });
+    } catch (err) {
+      if (err.code === 11000) {
+        const conflictErr = new Error('You already have an active token for this service at this center');
+        conflictErr.status = 409;
+        throw conflictErr;
+      }
+      throw err;
+    } finally {
+      await session.endSession();
+    }
+  } else {
+    // Non-transactional fallback for standalone Mongo instances without replica set
+    queue = await Queue.findOneAndUpdate(
+      { centerId, serviceId, date },
+      {
+        $inc: { lastIssuedNumber: 1, totalIssued: 1, waitingCount: 1 },
+        $setOnInsert: {
+          centerId,
+          serviceId,
+          date,
+          status: 'OPEN',
+          completedCount: 0,
+          abandonedCount: 0,
+          activeCount: 0,
+        },
+      },
+      { new: true, upsert: true }
+    );
+
+    if (queue.status !== 'OPEN') {
+      await Queue.findByIdAndUpdate(queue._id, {
+        $inc: { lastIssuedNumber: -1, totalIssued: -1, waitingCount: -1 },
+      });
+      const err = new Error('This queue is currently not accepting new tokens');
+      err.status = 409;
+      throw err;
+    }
+
+    const tokenNumber = queue.lastIssuedNumber;
+    tokenCode = formatTokenCode(service.tokenPrefix, tokenNumber);
+
+    waitEstimate = await waitTimeService.estimateWait({
+      centerId,
+      serviceId,
+      queue,
+      service,
+    });
+
+    position = queue.waitingCount;
+    const qrData = generateQRData('pending', tokenCode, centerId.toString());
+
+    try {
+      token = await Token.create({
+        tokenCode,
+        tokenNumber,
+        userId,
+        centerId,
+        serviceId,
+        status: 'WAITING',
+        initialPosition: position,
+        currentPosition: position,
+        waitEstimateMinutes: waitEstimate,
+        qrData,
+        notifyApp,
+        notifySms,
+      });
+    } catch (err) {
+      if (err.code === 11000) {
+        await Queue.findByIdAndUpdate(queue._id, {
+          $inc: { lastIssuedNumber: -1, totalIssued: -1, waitingCount: -1 },
+        });
+        const conflictErr = new Error('You already have an active token for this service at this center');
+        conflictErr.status = 409;
+        throw conflictErr;
+      }
+      throw err;
+    }
+
+    token.qrData = generateQRData(token._id.toString(), tokenCode, centerId.toString());
+    await token.save();
+  }
 
   // 8. Log the event
   await QueueEvent.create({
@@ -300,16 +424,24 @@ async function callNext({ counterId, centerId, adminId }) {
     .populate('currentTokenId', 'tokenCode status')
     .lean();
 
-  // Emit to center room (admin panel and all listeners)
+  const publicToken = _sanitizeTokenForCenter(populatedToken);
+
+  // Emit to center room (sanitized for public display boards)
   emitToCenter(centerId.toString(), 'token.called', {
+    token: publicToken,
+    counter: populatedCounter,
+  });
+
+  // Emit to verified customer's private room
+  emitToUser(nextToken.userId.toString(), 'token.called', {
     token: populatedToken,
     counter: populatedCounter,
   });
 
-  // Emit to counter display
+  // Emit to counter display kiosk
   emitToCounter(centerId.toString(), counterId.toString(), 'counter.updated', {
     counter: populatedCounter,
-    token: populatedToken,
+    token: publicToken,
   });
 
   // Notify the customer
@@ -368,7 +500,7 @@ async function startServing({ tokenId, counterId, adminId }) {
     .populate('counterId', 'name number')
     .lean();
 
-  emitToCenter(token.centerId.toString(), 'token.serving', { token: populated });
+  emitToCenter(token.centerId.toString(), 'token.serving', { token: _sanitizeTokenForCenter(populated) });
   emitToUser(token.userId.toString(), 'token.serving', { token: populated });
 
   return populated;
@@ -452,7 +584,7 @@ async function completeToken({ tokenId, counterId, adminId }) {
     : null;
 
   emitToCenter(token.centerId.toString(), 'token.completed', {
-    token: populated,
+    token: _sanitizeTokenForCenter(populated),
     counter: populatedCounter,
   });
   emitToUser(token.userId.toString(), 'token.completed', { token: populated });
@@ -526,7 +658,7 @@ async function skipToken({ tokenId, counterId, adminId }) {
 
   const populated = await Token.findById(token._id).populate('serviceId', 'name').lean();
 
-  emitToCenter(token.centerId.toString(), 'token.skipped', { token: populated });
+  emitToCenter(token.centerId.toString(), 'token.skipped', { token: _sanitizeTokenForCenter(populated) });
   emitToUser(token.userId.toString(), 'token.skipped', { token: populated });
 
   await notificationService.sendTokenNotification(token, 'TOKEN_SKIPPED', {
@@ -580,7 +712,7 @@ async function cancelToken({ tokenId, userId }) {
 
   const populated = await Token.findById(token._id).populate('serviceId', 'name').lean();
 
-  emitToCenter(token.centerId.toString(), 'token.cancelled', { token: populated });
+  emitToCenter(token.centerId.toString(), 'token.cancelled', { token: _sanitizeTokenForCenter(populated) });
   emitToUser(userId.toString(), 'token.cancelled', { token: populated });
 
   return populated;
@@ -617,7 +749,7 @@ async function expireToken({ tokenId, counterId }) {
   });
 
   const populated = await Token.findById(token._id).populate('serviceId', 'name').lean();
-  emitToCenter(token.centerId.toString(), 'token.expired', { token: populated });
+  emitToCenter(token.centerId.toString(), 'token.expired', { token: _sanitizeTokenForCenter(populated) });
   emitToUser(token.userId.toString(), 'token.expired', { token: populated });
 
   await notificationService.sendTokenNotification(token, 'TOKEN_EXPIRED', {

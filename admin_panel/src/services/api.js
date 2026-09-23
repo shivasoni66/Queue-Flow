@@ -1,6 +1,7 @@
 import axios from 'axios';
+import { disconnectSocket } from './socket';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+const API_BASE_URL = import.meta.env.VITE_API_URL;
 
 const api = axios.create({
   baseURL: `${API_BASE_URL}/api`,
@@ -27,9 +28,10 @@ api.interceptors.response.use(
   (response) => response.data,
   (error) => {
     if (error.response && error.response.status === 401) {
-      // Clear token on 401
+      // Clear token and disconnect socket on 401
       localStorage.removeItem('queueflow_admin_token');
       localStorage.removeItem('queueflow_admin_user');
+      disconnectSocket();
       if (window.location.pathname !== '/login') {
         window.location.href = '/login?expired=1';
       }

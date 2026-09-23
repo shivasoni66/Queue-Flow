@@ -35,26 +35,45 @@ connectDB();
 initSocket(server);
 
 // ─── Middleware ───────────────────────────────────
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173')
-  .split(',')
-  .map((o) => o.trim());
+const DEFAULT_ALLOWED_ORIGINS = [
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:5173',
+  'https://queue-flow-4308.onrender.com',
+];
 
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      // Allow requests with no origin (mobile apps, curl, Postman)
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error(`CORS: Origin ${origin} not allowed`));
-      }
-    },
-    credentials: true,
-  })
-);
+const envOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim().replace(/\/$/, '')).filter(Boolean)
+  : [];
+
+const allowedOrigins = Array.from(new Set([...DEFAULT_ALLOWED_ORIGINS, ...envOrigins]));
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, Postman)
+    if (!origin) return callback(null, true);
+
+    const normalizedOrigin = origin.trim().replace(/\/$/, '');
+    if (allowedOrigins.includes(normalizedOrigin)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS: Origin ${origin} not allowed`));
+  },
+  credentials: true,
+  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-iot-secret'],
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+
+const { sanitizeNoSql, preventParameterPollution } = require('./src/middleware/validate');
 
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
+app.use(preventParameterPollution);
+app.use(sanitizeNoSql);
 
 if (process.env.NODE_ENV !== 'test') {
   app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
@@ -129,10 +148,22 @@ app.use((err, _req, res, _next) => {
     return res.status(400).json({ success: false, message: 'Invalid ID format' });
   }
 
+  if (err.code === 11000) {
+    return res.status(409).json({
+      success: false,
+      message: 'You already have an active token for this service.',
+    });
+  }
+
   const status = err.status || err.statusCode || 500;
+  const message =
+    status >= 500 && process.env.NODE_ENV === 'production'
+      ? 'Internal server error'
+      : err.message || 'Internal server error';
+
   res.status(status).json({
     success: false,
-    message: err.message || 'Internal server error',
+    message,
     ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),
   });
 });

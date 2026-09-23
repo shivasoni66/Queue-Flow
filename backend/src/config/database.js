@@ -28,6 +28,11 @@ async function connectDB() {
       });
 
       console.log(`[DB] MongoDB connected: ${conn.connection.host}`);
+      // Ensure critical security indexes are registered
+      try {
+        const { Token } = require('../models/Token');
+        Token.init().catch((idxErr) => console.warn('[DB] Token index init warning:', idxErr.message));
+      } catch (_) {}
 
       mongoose.connection.on('disconnected', () => {
         console.warn('[DB] MongoDB disconnected.');
