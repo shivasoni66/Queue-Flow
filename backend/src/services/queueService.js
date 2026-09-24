@@ -190,7 +190,8 @@ async function joinQueue({ userId, centerId, serviceId, notifyApp = true, notify
         });
 
         position = queue.waitingCount;
-        const qrData = generateQRData('pending', tokenCode, centerId.toString());
+        // Generate temporary placeholder qrData (tokenId not yet known)
+        const tmpQrResult = generateQRData('pending', centerId.toString(), serviceId.toString());
 
         const [created] = await Token.create(
           [
@@ -204,7 +205,7 @@ async function joinQueue({ userId, centerId, serviceId, notifyApp = true, notify
               initialPosition: position,
               currentPosition: position,
               waitEstimateMinutes: waitEstimate,
-              qrData,
+              qrData: tmpQrResult.qrData,
               notifyApp,
               notifySms,
             },
@@ -212,7 +213,11 @@ async function joinQueue({ userId, centerId, serviceId, notifyApp = true, notify
           { session }
         );
 
-        created.qrData = generateQRData(created._id.toString(), tokenCode, centerId.toString());
+        // Regenerate signed QR with the real tokenId now that the document exists
+        const finalQrResult = generateQRData(created._id.toString(), centerId.toString(), serviceId.toString());
+        created.qrData = finalQrResult.qrData;
+        created.qrNonce = finalQrResult.nonce;
+        created.qrIssuedAt = finalQrResult.issuedAt;
         await created.save({ session });
         token = created;
       });
@@ -265,7 +270,8 @@ async function joinQueue({ userId, centerId, serviceId, notifyApp = true, notify
     });
 
     position = queue.waitingCount;
-    const qrData = generateQRData('pending', tokenCode, centerId.toString());
+    // Generate temporary placeholder (tokenId not yet known)
+    const tmpQrResult = generateQRData('pending', centerId.toString(), serviceId.toString());
 
     try {
       token = await Token.create({
@@ -278,7 +284,7 @@ async function joinQueue({ userId, centerId, serviceId, notifyApp = true, notify
         initialPosition: position,
         currentPosition: position,
         waitEstimateMinutes: waitEstimate,
-        qrData,
+        qrData: tmpQrResult.qrData,
         notifyApp,
         notifySms,
       });
@@ -294,7 +300,11 @@ async function joinQueue({ userId, centerId, serviceId, notifyApp = true, notify
       throw err;
     }
 
-    token.qrData = generateQRData(token._id.toString(), tokenCode, centerId.toString());
+    // Regenerate signed QR with the real tokenId
+    const finalQrResult = generateQRData(token._id.toString(), centerId.toString(), serviceId.toString());
+    token.qrData = finalQrResult.qrData;
+    token.qrNonce = finalQrResult.nonce;
+    token.qrIssuedAt = finalQrResult.issuedAt;
     await token.save();
   }
 

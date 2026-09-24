@@ -11,7 +11,8 @@
     "test:socket": "node test/socket_security.test.js",
     "test:auth": "node test/auth_security.test.js",
     "test:api": "node test/api_security.test.js",
-    "test:all": "node test/smoke.test.js && node test/socket_security.test.js && node test/auth_security.test.js && node test/api_security.test.js",
+    "test:qr": "node test/qr_security.test.js",
+    "test:all": "node test/smoke.test.js && node test/socket_security.test.js && node test/auth_security.test.js && node test/api_security.test.js && node test/qr_security.test.js",
     "seed": "node scripts/seed.js",
     "seed:clear": "node scripts/seed.js --clear"
   },

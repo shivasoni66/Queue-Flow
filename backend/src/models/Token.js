@@ -70,9 +70,25 @@ const tokenSchema = new mongoose.Schema(
       type: Number,
       default: null,
     },
-    // QR code data (compact string to be encoded as QR)
+    // QR code data (signed compact payload string to be encoded as QR)
     qrData: {
       type: String,
+    },
+    // Current active QR nonce (jti) — used for one-time replay protection.
+    // Stored and checked atomically during verify-qr. Cleared when token becomes terminal.
+    qrNonce: {
+      type: String,
+      default: null,
+    },
+    // When the current qrNonce was issued (for audit and freshness reference)
+    qrIssuedAt: {
+      type: Date,
+      default: null,
+    },
+    // Whether the QR has been successfully consumed (one-time check-in enforced)
+    qrConsumed: {
+      type: Boolean,
+      default: false,
     },
     // Notification preferences captured at token creation time
     notifyApp: {
