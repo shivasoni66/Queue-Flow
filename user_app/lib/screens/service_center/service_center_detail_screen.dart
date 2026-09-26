@@ -271,9 +271,9 @@ class ServiceCenterDetailScreen extends ConsumerWidget {
                               data: (queues) {
                                 final q = queues.where((item) => item.serviceId == service.id).firstOrNull;
                                 final waitCount = q?.waitingCount ?? 0;
-                                final estMins = (q != null && q.avgServiceTimeMinutes != null)
-                                    ? q.avgServiceTimeMinutes! * waitCount
-                                    : service.estimatedDuration;
+                                // Tier 3 / Feature 1: consume the server-authoritative
+                                // context-aware EWT. Never recompute it in Dart.
+                                final estMins = q?.estimatedWaitMinutes ?? service.estimatedDuration;
 
                                 return Row(
                                   children: [

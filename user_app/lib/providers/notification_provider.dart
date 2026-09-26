@@ -1,4 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../core/constants/api_constants.dart';
 import '../core/network/api_exception.dart';
 import '../models/notification.dart';
 import '../services/api_service.dart';
@@ -59,12 +60,22 @@ class NotificationsNotifier extends StateNotifier<NotificationsState> {
   }
 
   void _initSocket() {
-    socketService.on('notification.created', (data) async {
+    // Backend emits notification.created as { notification: {...} } and omits the
+    // userId from the payload — the private user room is the authority for routing.
+    // Fall back to a flat payload for robustness.
+    socketService.on(ApiConstants.eventNotificationCreated, (data) async {
       if (data is Map) {
-        final newNotification = NotificationModel.fromJson(data as Map<String, dynamic>);
+        final raw = (data['notification'] is Map)
+            ? Map<String, dynamic>.from(data['notification'] as Map)
+            : Map<String, dynamic>.from(data);
+        final newNotification = NotificationModel.fromJson(raw);
         final myUserId = await _getCurrentUserId();
-        if (myUserId == null || myUserId.isEmpty || newNotification.userId.isEmpty || newNotification.userId != myUserId) {
-          // Reject notifications meant for another user
+        // Payload without userId: the socket room already scoped it to this user.
+        // If a userId is present it must match; otherwise reject the notification.
+        if (newNotification.userId.isNotEmpty &&
+            myUserId != null &&
+            myUserId.isNotEmpty &&
+            newNotification.userId != myUserId) {
           return;
         }
         state = state.copyWith(

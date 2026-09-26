@@ -35,6 +35,18 @@ const userSchema = new mongoose.Schema(
       enum: ['CUSTOMER', 'STAFF', 'ADMIN'],
       default: 'CUSTOMER',
     },
+    // Center assignment for STAFF/ADMIN
+    centerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'ServiceCenter',
+      default: null,
+    },
+    // Counter assignment for STAFF operator
+    assignedCounterId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Counter',
+      default: null,
+    },
     rfidUid: {
       type: String,
       sparse: true,
@@ -78,6 +90,37 @@ const userSchema = new mongoose.Schema(
 // ─── Indexes ──────────────────────────────────────
 userSchema.index({ phone: 1 }, { sparse: true });
 userSchema.index({ role: 1 });
+// Unique non-null device token ownership: exactly one user can own an active fcmToken
+userSchema.index(
+  { fcmToken: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { fcmToken: { $type: 'string' } },
+    name: 'unique_non_null_fcm_token',
+  }
+);
+
+// ─── Account deactivation hooks (clear device token on deactivation) ────
+userSchema.pre('save', function (next) {
+  if (this.isModified('isActive') && this.isActive === false) {
+    this.fcmToken = null;
+  }
+  next();
+});
+
+userSchema.pre('findOneAndUpdate', function (next) {
+  const update = this.getUpdate();
+  if (update) {
+    if (update.isActive === false || (update.$set && update.$set.isActive === false)) {
+      if (update.$set) {
+        update.$set.fcmToken = null;
+      } else {
+        update.fcmToken = null;
+      }
+    }
+  }
+  next();
+});
 
 // ─── Instance methods ─────────────────────────────
 userSchema.methods.comparePassword = async function (candidatePassword) {

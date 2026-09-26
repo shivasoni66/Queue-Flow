@@ -10,6 +10,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const { sendSuccess, sendBadRequest, sendNotFound } = require('../utils/apiResponse');
 const { emitToCenter } = require('../config/socket');
 const { verifyQRPayload } = require('../utils/qrSecurity');
+const { logger } = require('../utils/logger');
 
 // ─── Validation ───────────────────────────────────
 const rfidValidation = [
@@ -154,9 +155,11 @@ const scanQR = asyncHandler(async (req, res) => {
   try {
     parsed = verifyQRPayload(qrPayload);
   } catch (err) {
-    if (process.env.NODE_ENV !== 'test') {
-      console.warn('[IoT QR] Verification failure:', err._reason || err.message);
-    }
+    logger.security('IOT_QR_VERIFICATION_FAILURE', {
+      requestId: req.id,
+      reason: err._reason || err.message,
+      clientIp: req.ip,
+    });
     return sendBadRequest(res, 'QR verification failed');
   }
 
@@ -180,6 +183,11 @@ const scanQR = asyncHandler(async (req, res) => {
   );
 
   if (!token) {
+    logger.security('IOT_QR_VERIFICATION_FAILURE', {
+      requestId: req.id,
+      reason: 'nonce_replay_or_token_consumed_or_inactive',
+      clientIp: req.ip,
+    });
     return sendBadRequest(res, 'QR verification failed');
   }
 

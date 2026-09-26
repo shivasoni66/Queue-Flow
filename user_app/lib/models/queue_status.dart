@@ -9,6 +9,7 @@ class QueueStatus {
     this.tokenPrefix,
     this.status = 'OPEN',
     this.avgServiceTimeMinutes,
+    this.estimatedWaitMinutes,
   });
 
   final String serviceId;
@@ -20,6 +21,13 @@ class QueueStatus {
   final String? tokenPrefix;
   final String status;
   final int? avgServiceTimeMinutes;
+
+  /// Server-authoritative Estimated Wait Time in minutes.
+  ///
+  /// Tier 3 / Feature 1: the backend context-aware EWT engine owns this number.
+  /// The client MUST render it as-is and MUST NOT derive a second estimate from
+  /// [avgServiceTimeMinutes] or [waitingCount].
+  final int? estimatedWaitMinutes;
 
   factory QueueStatus.fromJson(Map<String, dynamic> json) {
     // Handle both /api/queue/:centerId array items and /api/queue/:centerId/:serviceId objects
@@ -53,6 +61,7 @@ class QueueStatus {
       tokenPrefix: sPrefix,
       status: (json['status'] ?? 'OPEN').toString(),
       avgServiceTimeMinutes: sAvg,
+      estimatedWaitMinutes: (json['estimatedWaitMinutes'] as num?)?.toInt(),
     );
   }
 }

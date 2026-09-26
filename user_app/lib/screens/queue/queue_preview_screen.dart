@@ -27,6 +27,8 @@ class _QueuePreviewScreenState extends ConsumerState<QueuePreviewScreen> {
   bool _isLoading = true;
   bool _isJoining = false;
   String? _error;
+  bool _isActiveTokenConflict = false;
+  String? _loadError;
   bool _notifyApp = true;
   bool _notifySms = false;
 
@@ -43,7 +45,7 @@ class _QueuePreviewScreenState extends ConsumerState<QueuePreviewScreen> {
   Future<void> _fetchQueueDetails() async {
     setState(() {
       _isLoading = true;
-      _error = null;
+      _loadError = null;
     });
 
     try {
@@ -53,17 +55,21 @@ class _QueuePreviewScreenState extends ConsumerState<QueuePreviewScreen> {
       final calledTokens = (res['calledTokens'] as List?) ?? [];
 
       final waitCount = (queueData?['waitingCount'] as num?)?.toInt() ?? 0;
-      final avgSecs = (queueData?['avgServiceTimeSeconds'] as num?)?.toInt() ?? 0;
-      final avgMins = avgSecs > 0 ? (avgSecs / 60).ceil() : widget.service.estimatedDuration;
+
+      // Tier 3 / Feature 1: the backend context-aware EWT engine is the single
+      // authority. Render its value; never derive a second estimate in Dart.
+      final ewt = (res['estimatedWaitMinutes'] as num?)?.toInt();
 
       String? servingCode;
       if (calledTokens.isNotEmpty) {
         servingCode = calledTokens.first['tokenCode']?.toString();
       }
 
+      if (!mounted) return;
       setState(() {
         _waitingCount = waitCount;
-        _estWaitMinutes = avgMins != null && avgMins > 0 ? (waitCount * avgMins).clamp(1, 240) : null;
+        _estWaitMinutes =
+            ewt != null ? ewt.clamp(1, 240) : (waitCount > 0 ? widget.service.estimatedDuration : null);
         _currentlyServingCode = servingCode;
         _isLoading = false;
       });
@@ -71,7 +77,10 @@ class _QueuePreviewScreenState extends ConsumerState<QueuePreviewScreen> {
       if (mounted) {
         setState(() {
           _isLoading = false;
-          _estWaitMinutes = widget.service.estimatedDuration;
+          _loadError = ApiException.getUserMessage(e);
+          _waitingCount = 0;
+          _estWaitMinutes = null;
+          _currentlyServingCode = null;
         });
       }
     }
@@ -100,6 +109,7 @@ class _QueuePreviewScreenState extends ConsumerState<QueuePreviewScreen> {
         setState(() {
           _isJoining = false;
           _error = ApiException.getUserMessage(e);
+          _isActiveTokenConflict = e is ApiException && e.code == 'ACTIVE_TOKEN_EXISTS';
         });
       }
     }
@@ -203,6 +213,43 @@ class _QueuePreviewScreenState extends ConsumerState<QueuePreviewScreen> {
                   ),
                   const SizedBox(height: 24),
 
+                  // ─── LOAD ERROR BANNER ─────────────────────────────
+                  if (_loadError != null) ...[
+                    Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: AppColors.danger.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: AppColors.danger.withValues(alpha: 0.4)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Icon(Icons.cloud_off_rounded, color: AppColors.danger, size: 20),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  'Unable to load live queue details. $_loadError',
+                                  style: const TextStyle(color: AppColors.danger, fontSize: 13, fontWeight: FontWeight.w600),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 10),
+                          TextButton.icon(
+                            onPressed: _isLoading ? null : _fetchQueueDetails,
+                            icon: const Icon(Icons.refresh_rounded, size: 18),
+                            label: const Text('Retry'),
+                            style: TextButton.styleFrom(foregroundColor: AppColors.danger),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+
                   // ─── ERROR BANNER ──────────────────────────────────
                   if (_error != null) ...[
                     Container(
@@ -227,7 +274,7 @@ class _QueuePreviewScreenState extends ConsumerState<QueuePreviewScreen> {
                               ),
                             ],
                           ),
-                          if (_error!.contains('already have an active token')) ...[
+                          if (_isActiveTokenConflict) ...[
                             const SizedBox(height: 10),
                             ElevatedButton(
                               onPressed: () => context.go('/token/live'),

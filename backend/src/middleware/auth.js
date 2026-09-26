@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const { sendUnauthorized, sendForbidden } = require('../utils/apiResponse');
 const asyncHandler = require('../utils/asyncHandler');
+const { logger } = require('../utils/logger');
 
 /**
  * Middleware: verify JWT and attach the authenticated user to req.user.
@@ -17,6 +18,11 @@ const protect = asyncHandler(async (req, res, next) => {
   }
 
   if (!token) {
+    logger.security('AUTH_TOKEN_REJECTED', {
+      requestId: req.id,
+      reason: 'missing_token',
+      clientIp: req.ip,
+    });
     return sendUnauthorized(res, 'No authentication token provided');
   }
 
@@ -24,6 +30,12 @@ const protect = asyncHandler(async (req, res, next) => {
   try {
     decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
   } catch (err) {
+    const reason = err.name === 'TokenExpiredError' ? 'token_expired' : 'invalid_token_signature';
+    logger.security('AUTH_TOKEN_REJECTED', {
+      requestId: req.id,
+      reason,
+      clientIp: req.ip,
+    });
     if (err.name === 'TokenExpiredError') {
       return sendUnauthorized(res, 'Token has expired. Please log in again.');
     }
@@ -33,10 +45,21 @@ const protect = asyncHandler(async (req, res, next) => {
   const user = await User.findById(decoded.id).select('-passwordHash');
 
   if (!user) {
+    logger.security('AUTH_TOKEN_REJECTED', {
+      requestId: req.id,
+      reason: 'user_not_found',
+      clientIp: req.ip,
+    });
     return sendUnauthorized(res, 'User account not found');
   }
 
   if (!user.isActive) {
+    logger.security('AUTH_TOKEN_REJECTED', {
+      requestId: req.id,
+      reason: 'user_deactivated',
+      userId: user._id.toString(),
+      clientIp: req.ip,
+    });
     return sendUnauthorized(res, 'Your account has been deactivated');
   }
 
@@ -47,6 +70,12 @@ const protect = asyncHandler(async (req, res, next) => {
     typeof decoded.tokenVersion !== 'number' ||
     decoded.tokenVersion !== currentVersion
   ) {
+    logger.security('AUTH_TOKEN_REJECTED', {
+      requestId: req.id,
+      reason: 'token_revoked',
+      userId: user._id.toString(),
+      clientIp: req.ip,
+    });
     return sendUnauthorized(res, 'Session has expired or been revoked. Please log in again.');
   }
 
@@ -83,6 +112,11 @@ function requireRole(...roles) {
 function iotSecret(req, res, next) {
   const secret = req.headers['x-iot-secret'];
   if (!secret || secret !== process.env.IOT_SECRET) {
+    logger.security('AUTH_IOT_FAILURE', {
+      requestId: req.id,
+      clientIp: req.ip,
+      reason: !secret ? 'missing_iot_secret' : 'invalid_iot_secret',
+    });
     return sendUnauthorized(res, 'Invalid IoT device secret');
   }
   next();

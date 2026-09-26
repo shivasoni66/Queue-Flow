@@ -39,7 +39,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final user = ref.watch(authProvider).user;
+    final authState = ref.watch(authProvider);
+    final user = authState.user;
     final tokenState = ref.watch(tokenProvider);
     final centersAsync = ref.watch(serviceCentersProvider);
 
@@ -81,6 +82,41 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         child: CustomScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
           slivers: [
+            // ─── OFFLINE / INFO BANNER ───────────────────────────────
+            // Shown when signed in from a cached session but the server could
+            // not be reached (e.g. "Working offline: unable to reach QueueFlow
+            // server."). Live data already falls back gracefully elsewhere.
+            if (authState.isAuthenticated && authState.errorMessage != null)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  child: Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: AppColors.warning.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: AppColors.warning.withValues(alpha: 0.4)),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.wifi_off_rounded, color: AppColors.warning, size: 20),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            authState.errorMessage!,
+                            style: const TextStyle(
+                              color: AppColors.textPrimary,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+
             // ─── ACTIVE TOKEN BANNER ─────────────────────────────────
             if (tokenState.activeToken != null && tokenState.activeToken!.isActive)
               SliverToBoxAdapter(

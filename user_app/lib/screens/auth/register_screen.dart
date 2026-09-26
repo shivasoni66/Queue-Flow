@@ -32,26 +32,18 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
     if (ref.read(authProvider).isLoading) return;
     if (!_formKey.currentState!.validate()) return;
 
-    try {
-      final success = await ref.read(authProvider.notifier).register(
-            name: _nameController.text.trim(),
-            email: _emailController.text.trim(),
-            password: _passwordController.text,
-            phone: _phoneController.text.trim(),
-          );
-
-      if (success && mounted) {
-        context.go('/home');
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Registration failed: ${e.toString()}'),
-            backgroundColor: AppColors.danger,
-          ),
+    // AuthNotifier.register() never throws: it returns a bool and publishes the
+    // failure message into authState.errorMessage, which is rendered in the error
+    // banner below. Errors are surfaced there to avoid duplicated/raw-message UI.
+    final success = await ref.read(authProvider.notifier).register(
+          name: _nameController.text.trim(),
+          email: _emailController.text.trim(),
+          password: _passwordController.text,
+          phone: _phoneController.text.trim(),
         );
-      }
+
+    if (success && mounted) {
+      context.go('/home');
     }
   }
 

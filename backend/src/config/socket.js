@@ -2,8 +2,16 @@
 
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
+const { createAdapter } = require('@socket.io/redis-adapter');
+const { createRedisClient, isRedisEnabled, isRedisRequired } = require('./redis');
+const { ALLOWED_ORIGINS } = require('./env');
+const { logger } = require('../utils/logger');
 
-let io;
+let io = null;
+let adapterPubClient = null;
+let adapterSubClient = null;
+let adapterMode = 'memory';
+let isAdapterReady = false;
 
 // ─── Validated MongoDB ObjectId format ────────────────────────────────────────
 const MONGO_ID_REGEX = /^[a-fA-F0-9]{24}$/;
@@ -47,6 +55,14 @@ function extractBearer(value) {
  *     generic message to avoid information leakage.
  */
 async function socketAuthMiddleware(socket, next) {
+  try {
+    const { isShuttingDown } = require('../utils/shutdown');
+    if (isShuttingDown()) {
+      logger.security('SOCKET_AUTH_FAILURE', { socketId: socket.id, reason: 'SERVER_SHUTTING_DOWN' });
+      return next(new Error('SERVER_SHUTTING_DOWN'));
+    }
+  } catch (_) {}
+
   // ── Extract token ──────────────────────────────────────────────────────────
   const authToken = extractBearer(socket.handshake.auth && socket.handshake.auth.token);
   const headerToken = extractBearer(
@@ -58,6 +74,7 @@ async function socketAuthMiddleware(socket, next) {
   if (authToken && headerToken) {
     if (authToken !== headerToken) {
       // Mismatched credentials — refuse rather than guess
+      logger.security('SOCKET_AUTH_FAILURE', { socketId: socket.id, reason: 'SOCKET_AUTH_MISMATCH' });
       return next(new Error('SOCKET_AUTH_MISMATCH'));
     }
     token = authToken;
@@ -66,6 +83,7 @@ async function socketAuthMiddleware(socket, next) {
   }
 
   if (!token) {
+    logger.security('SOCKET_AUTH_FAILURE', { socketId: socket.id, reason: 'SOCKET_AUTH_REQUIRED' });
     return next(new Error('SOCKET_AUTH_REQUIRED'));
   }
 
@@ -76,11 +94,13 @@ async function socketAuthMiddleware(socket, next) {
   } catch (_err) {
     // Covers: TokenExpiredError, JsonWebTokenError, NotBeforeError
     // Generic message — do NOT reveal whether it was expired vs tampered.
+    logger.security('SOCKET_AUTH_FAILURE', { socketId: socket.id, reason: 'SOCKET_AUTH_INVALID' });
     return next(new Error('SOCKET_AUTH_INVALID'));
   }
 
   // ── Validate decoded payload ───────────────────────────────────────────────
   if (!decoded || typeof decoded.id !== 'string' || !MONGO_ID_REGEX.test(decoded.id)) {
+    logger.security('SOCKET_AUTH_FAILURE', { socketId: socket.id, reason: 'SOCKET_AUTH_INVALID' });
     return next(new Error('SOCKET_AUTH_INVALID'));
   }
 
@@ -90,10 +110,12 @@ async function socketAuthMiddleware(socket, next) {
     const user = await User.findById(decoded.id).select('role tokenVersion isActive');
     if (user) {
       if (user.isActive === false) {
+        logger.security('SOCKET_AUTH_FAILURE', { socketId: socket.id, reason: 'SOCKET_AUTH_DEACTIVATED' });
         return next(new Error('SOCKET_AUTH_INVALID'));
       }
       const currentVersion = user.tokenVersion !== undefined ? user.tokenVersion : 0;
       if (typeof decoded.tokenVersion === 'number' && decoded.tokenVersion !== currentVersion) {
+        logger.security('SOCKET_AUTH_FAILURE', { socketId: socket.id, reason: 'SOCKET_AUTH_REVOKED' });
         return next(new Error('SOCKET_AUTH_REVOKED'));
       }
     }
@@ -118,30 +140,123 @@ async function socketAuthMiddleware(socket, next) {
 }
 
 /**
+ * Attach Redis pub/sub adapter to Socket.IO server.
+ *
+ * In production:
+ * - Strictly mandatory. Throws FATAL_REDIS_CONFIG if missing/disabled.
+ *
+ * In development/test:
+ * - Falls back cleanly to default in-memory adapter if Redis is unconfigured.
+ * - Accepts custom { pubClient, subClient } options for tests/mock harnesses.
+ */
+function setupRedisAdapter(ioInstance, options = {}) {
+  // Custom adapter injection for automated tests or custom harnesses
+  if (options.pubClient && options.subClient) {
+    adapterPubClient = options.pubClient;
+    adapterSubClient = options.subClient;
+    adapterMode = 'redis';
+    isAdapterReady = true;
+    ioInstance.adapter(createAdapter(adapterPubClient, adapterSubClient));
+    console.log('[Socket] Redis pub/sub adapter attached (custom/test configuration)');
+    return;
+  }
+
+  const isProd = process.env.NODE_ENV === 'production';
+  const redisRequired = isRedisRequired();
+  const redisEnabled = isRedisEnabled();
+
+  if (isProd) {
+    if (process.env.REDIS_ENABLED === 'false') {
+      const err = new Error(
+        'FATAL_REDIS_CONFIG: Redis cannot be disabled (REDIS_ENABLED=false) in production. ' +
+        'Horizontal scaling is strictly mandatory for Socket.IO in production. Cannot fall back to local-only in-memory adapter.'
+      );
+      console.error(`[Socket] ${err.message}`);
+      throw err;
+    }
+    const hasConfig = Boolean(process.env.REDIS_URL || process.env.REDIS_HOST);
+    if (!hasConfig) {
+      const err = new Error(
+        'FATAL_REDIS_CONFIG: Redis configuration missing in production for Socket.IO horizontal scaling. ' +
+        'Please configure REDIS_URL or REDIS_HOST.'
+      );
+      console.error(`[Socket] ${err.message}`);
+      throw err;
+    }
+  } else if (!redisEnabled) {
+    if (redisRequired) {
+      const err = new Error('REDIS_REQUIRED: Redis is mandatory in this environment but not configured');
+      console.error(`[Socket] Fatal: ${err.message}`);
+      throw err;
+    }
+    adapterMode = 'memory';
+    isAdapterReady = true;
+    console.log('[Socket] Operating in single-instance memory adapter mode (development/test only)');
+    return;
+  }
+
+  try {
+    adapterPubClient = createRedisClient('socket-pub');
+    adapterSubClient = createRedisClient('socket-sub');
+
+    adapterPubClient.on('ready', () => {
+      if (adapterSubClient && adapterSubClient.status === 'ready') {
+        isAdapterReady = true;
+      }
+    });
+
+    adapterSubClient.on('ready', () => {
+      if (adapterPubClient && adapterPubClient.status === 'ready') {
+        isAdapterReady = true;
+      }
+    });
+
+    const handleAdapterError = (role, err) => {
+      isAdapterReady = false;
+      console.error(`[Socket:Adapter] Redis ${role} client error:`, err.message);
+      if (isProd || redisRequired) {
+        console.error('[Socket:Adapter] CRITICAL: Cross-instance pub/sub synchronization degraded');
+      }
+    };
+
+    adapterPubClient.on('error', (err) => handleAdapterError('pub', err));
+    adapterSubClient.on('error', (err) => handleAdapterError('sub', err));
+
+    adapterPubClient.on('close', () => {
+      isAdapterReady = false;
+    });
+    adapterSubClient.on('close', () => {
+      isAdapterReady = false;
+    });
+
+    ioInstance.adapter(createAdapter(adapterPubClient, adapterSubClient));
+    adapterMode = 'redis';
+    console.log('[Socket] Redis pub/sub adapter initialized for horizontal scaling');
+  } catch (err) {
+    if (isProd || redisRequired) {
+      console.error('[Socket] Failed to attach Redis adapter in production:', err.message);
+      throw err;
+    }
+    adapterMode = 'memory';
+    isAdapterReady = true;
+    console.warn('[Socket] Redis adapter failed to initialize, falling back to memory adapter (dev only):', err.message);
+  }
+}
+
+/**
  * Initialize the Socket.IO server.
  * Must be called once from server.js after the HTTP server is created.
+ *
+ * @param {import('http').Server} httpServer
+ * @param {object} [options={}] Optional configuration including custom adapter clients
  */
-function initSocket(httpServer) {
-  const DEFAULT_ALLOWED_ORIGINS = [
-    'http://localhost:3000',
-    'http://localhost:5173',
-    'http://127.0.0.1:3000',
-    'http://127.0.0.1:5173',
-    'https://queue-flow-4308.onrender.com',
-  ];
-
-  const envOrigins = process.env.ALLOWED_ORIGINS
-    ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim().replace(/\/$/, '')).filter(Boolean)
-    : [];
-
-  const allowedOrigins = Array.from(new Set([...DEFAULT_ALLOWED_ORIGINS, ...envOrigins]));
-
+function initSocket(httpServer, options = {}) {
   io = new Server(httpServer, {
     cors: {
       origin: (origin, callback) => {
         if (!origin) return callback(null, true);
         const normalizedOrigin = origin.trim().replace(/\/$/, '');
-        if (allowedOrigins.includes(normalizedOrigin)) {
+        if (ALLOWED_ORIGINS.includes(normalizedOrigin)) {
           callback(null, true);
         } else {
           callback(new Error(`Socket.IO CORS: Origin ${origin} not allowed`));
@@ -154,6 +269,9 @@ function initSocket(httpServer) {
     pingInterval: 25000,
     transports: ['websocket', 'polling'],
   });
+
+  // Attach horizontal scaling Redis adapter
+  setupRedisAdapter(io, options);
 
   // ─── JWT authentication middleware ─────────────────────────────────────────
   // Every incoming socket MUST carry a valid JWT. Unauthenticated connections
@@ -305,18 +423,93 @@ function broadcast(event, data) {
 }
 
 /**
- * Disconnect and revoke all active sockets for a specific user.
- * Disconnects existing sockets in the user room and removes them.
+ * Disconnect and revoke all active sockets for a specific user across all backend instances.
+ * In multi-instance mode with @socket.io/redis-adapter, disconnectSockets broadcasts
+ * a REMOTE_DISCONNECT request across the Redis cluster so all nodes disconnect matching sockets.
+ *
  * @param {string} userId
+ * @returns {Promise<void>}
  */
 function disconnectUserSockets(userId) {
-  if (!io || !userId) return;
+  if (!io || !userId) return Promise.resolve();
   try {
     const userRoom = `user:${userId}`;
-    io.in(userRoom).disconnectSockets(true);
+    const p = io.in(userRoom).disconnectSockets(true);
     console.log(`[Socket] Revoked and disconnected all sockets for user ${userId}`);
+    logger.security('SOCKET_USER_REVOKED', { userId: String(userId) });
+    return Promise.resolve(p);
   } catch (err) {
     console.error(`[Socket] Error revoking sockets for user ${userId}:`, err.message);
+    return Promise.resolve();
+  }
+}
+
+/**
+ * Gracefully close Redis pub/sub adapter connections.
+ * Exposed for clean server shutdown and testing.
+ *
+ * @returns {Promise<void>}
+ */
+async function closeSocketAdapter() {
+  const promises = [];
+  if (adapterPubClient) {
+    promises.push(
+      adapterPubClient.quit().catch((err) => {
+        console.warn('[Socket:pubClient] Force disconnecting:', err.message);
+        adapterPubClient.disconnect();
+      })
+    );
+  }
+  if (adapterSubClient) {
+    promises.push(
+      adapterSubClient.quit().catch((err) => {
+        console.warn('[Socket:subClient] Force disconnecting:', err.message);
+        adapterSubClient.disconnect();
+      })
+    );
+  }
+  await Promise.all(promises);
+  adapterPubClient = null;
+  adapterSubClient = null;
+  adapterMode = 'memory';
+  isAdapterReady = false;
+  console.log('[Socket] Redis pub/sub adapter connections closed gracefully');
+}
+
+/**
+ * Retrieve current adapter health and status.
+ *
+ * @returns {{ mode: string, isReady: boolean, pubStatus: string, subStatus: string }}
+ */
+function getAdapterStatus() {
+  return {
+    mode: adapterMode,
+    isReady: isAdapterReady,
+    pubStatus: adapterPubClient ? adapterPubClient.status : 'none',
+    subStatus: adapterSubClient ? adapterSubClient.status : 'none',
+  };
+}
+
+/**
+ * Gracefully close Socket.IO server and disconnect all connected clients.
+ *
+ * @returns {Promise<void>}
+ */
+async function closeSocket() {
+  if (io) {
+    try {
+      io.disconnectSockets(true);
+      await new Promise((resolve) => {
+        io.close(() => {
+          resolve();
+        });
+      });
+      console.log('[Socket] Socket.IO server closed');
+    } catch (err) {
+      console.warn('[Socket] Error closing Socket.IO server:', err.message);
+    } finally {
+      io = null;
+    }
   }
 }
 
@@ -328,4 +521,8 @@ module.exports = {
   emitToCounter,
   broadcast,
   disconnectUserSockets,
+  closeSocketAdapter,
+  closeSocket,
+  getAdapterStatus,
+  setupRedisAdapter,
 };

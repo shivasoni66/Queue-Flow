@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import '../../core/network/api_exception.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/date_formatter.dart';
 import '../../models/token.dart';
@@ -66,19 +67,30 @@ class HistoryScreen extends ConsumerWidget {
             ElevatedButton(
               onPressed: () async {
                 Navigator.of(ctx).pop();
-                await ref.read(tokenProvider.notifier).submitFeedback(
-                      tokenId: token.id,
-                      rating: rating,
-                      comment: commentController.text,
+                try {
+                  await ref.read(tokenProvider.notifier).submitFeedback(
+                        tokenId: token.id,
+                        rating: rating,
+                        comment: commentController.text,
+                      );
+                  ref.invalidate(tokenHistoryProvider);
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Feedback submitted. Thank you!'),
+                        backgroundColor: AppColors.success,
+                      ),
                     );
-                ref.invalidate(tokenHistoryProvider);
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Feedback submitted. Thank you!'),
-                      backgroundColor: AppColors.success,
-                    ),
-                  );
+                  }
+                } catch (e) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text('Unable to submit feedback: ${ApiException.getUserMessage(e)}'),
+                        backgroundColor: AppColors.danger,
+                      ),
+                    );
+                  }
                 }
               },
               child: const Text('Submit'),

@@ -1,4 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../core/constants/api_constants.dart';
 import '../core/network/api_exception.dart';
 import '../models/token.dart';
 import '../services/api_service.dart';
@@ -57,7 +58,7 @@ class TokenNotifier extends StateNotifier<TokenState> {
 
   void _initSocketListeners() {
     // 1. Authoritative queue updates: when any queue change occurs, re-sync from server
-    socketService.on('queue.updated', (data) {
+    socketService.on(ApiConstants.eventQueueUpdated, (data) {
       if (state.activeToken != null) {
         // Re-sync with authoritative server state rather than calculating client-side
         fetchActiveToken();
@@ -65,7 +66,7 @@ class TokenNotifier extends StateNotifier<TokenState> {
     });
 
     // 2. Token created
-    socketService.on('token.created', (data) async {
+    socketService.on(ApiConstants.eventTokenCreated, (data) async {
       if (data is Map && data.containsKey('token')) {
         final created = TokenModel.fromJson(data['token'] as Map<String, dynamic>);
         final myUserId = await _getCurrentUserId();
@@ -77,7 +78,7 @@ class TokenNotifier extends StateNotifier<TokenState> {
     });
 
     // 3. Token called
-    socketService.on('token.called', (data) {
+    socketService.on(ApiConstants.eventTokenCalled, (data) {
       if (data is Map && data.containsKey('token')) {
         final updated = TokenModel.fromJson(data['token'] as Map<String, dynamic>);
         if (state.activeToken != null &&
@@ -89,7 +90,7 @@ class TokenNotifier extends StateNotifier<TokenState> {
     });
 
     // 4. Token serving
-    socketService.on('token.serving', (data) {
+    socketService.on(ApiConstants.eventTokenServing, (data) {
       if (data is Map && data.containsKey('token')) {
         final updated = TokenModel.fromJson(data['token'] as Map<String, dynamic>);
         if (state.activeToken != null &&
@@ -101,7 +102,7 @@ class TokenNotifier extends StateNotifier<TokenState> {
     });
 
     // 5. Token completed
-    socketService.on('token.completed', (data) {
+    socketService.on(ApiConstants.eventTokenCompleted, (data) {
       if (data is Map && data.containsKey('token')) {
         final updated = TokenModel.fromJson(data['token'] as Map<String, dynamic>);
         if (state.activeToken != null &&
@@ -113,7 +114,7 @@ class TokenNotifier extends StateNotifier<TokenState> {
     });
 
     // 6. Token skipped
-    socketService.on('token.skipped', (data) {
+    socketService.on(ApiConstants.eventTokenSkipped, (data) {
       if (data is Map && data.containsKey('token')) {
         final updated = TokenModel.fromJson(data['token'] as Map<String, dynamic>);
         if (state.activeToken != null &&
@@ -125,7 +126,7 @@ class TokenNotifier extends StateNotifier<TokenState> {
     });
 
     // 7. Token cancelled
-    socketService.on('token.cancelled', (data) {
+    socketService.on(ApiConstants.eventTokenCancelled, (data) {
       if (data is Map && data.containsKey('token')) {
         final updated = TokenModel.fromJson(data['token'] as Map<String, dynamic>);
         if (state.activeToken != null &&
@@ -137,7 +138,7 @@ class TokenNotifier extends StateNotifier<TokenState> {
     });
 
     // 8. Token expired
-    socketService.on('token.expired', (data) {
+    socketService.on(ApiConstants.eventTokenExpired, (data) {
       if (data is Map && data.containsKey('token')) {
         final updated = TokenModel.fromJson(data['token'] as Map<String, dynamic>);
         if (state.activeToken != null &&
@@ -147,9 +148,32 @@ class TokenNotifier extends StateNotifier<TokenState> {
         }
       }
     });
+
+    // 9. Token live position/wait re-estimation for a waiting token.
+    // Backend payload (private user room): { tokenId, currentPosition, waitEstimateMinutes }
+    socketService.on(ApiConstants.eventTokenPositionUpdated, (data) {
+      if (data is Map) {
+        final tokenId = (data['tokenId'] ?? '').toString();
+        final position = (data['currentPosition'] as num?)?.toInt();
+        final wait = data['waitEstimateMinutes'] != null
+            ? (data['waitEstimateMinutes'] as num?)?.toInt()
+            : null;
+        final active = state.activeToken;
+        if (tokenId.isEmpty || active == null || active.id != tokenId || position == null) {
+          return;
+        }
+        state = state.copyWith(
+          activeToken: active.copyWith(
+            currentPosition: position,
+            waitEstimateMinutes: wait,
+          ),
+        );
+      }
+    });
   }
 
   Future<void> fetchActiveToken() async {
+    if (state.isLoading) return;
     state = state.copyWith(isLoading: true, error: null);
     try {
       final token = await apiService.getActiveToken();

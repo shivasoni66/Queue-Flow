@@ -6,6 +6,7 @@ const queueService = require('../services/queueService');
 const { generateQRCodeImage } = require('../utils/tokenUtils');
 const { verifyQRPayload, QR_TTL_SECONDS } = require('../utils/qrSecurity');
 const asyncHandler = require('../utils/asyncHandler');
+const { logger } = require('../utils/logger');
 const {
   sendSuccess,
   sendCreated,
@@ -131,8 +132,49 @@ const getMyTokens = asyncHandler(async (req, res) => {
 });
 
 /**
+ * Internal helper to enrich a live active token with real-time queue context:
+ * people ahead, currently serving token, and active counters for that service.
+ */
+async function _enrichTokenWithLiveQueue(token) {
+  if (!token || !['WAITING', 'CALLED', 'SERVING'].includes(token.status)) {
+    return token;
+  }
+  const Counter = require('../models/Counter');
+  const centerId = token.centerId?._id || token.centerId;
+  const serviceId = token.serviceId?._id || token.serviceId;
+
+  const peopleAhead = token.status === 'WAITING' ? Math.max(0, (token.currentPosition || 1) - 1) : 0;
+
+  const servingToken = await Token.findOne({
+    centerId,
+    serviceId,
+    status: { $in: ['CALLED', 'SERVING'] },
+  })
+    .populate('counterId', 'name number displayLabel')
+    .sort({ calledAt: -1 })
+    .select('tokenCode status counterId calledAt')
+    .lean();
+
+  const activeCounters = await Counter.find({
+    centerId,
+    serviceId,
+    status: 'ACTIVE',
+  })
+    .select('name number displayLabel currentTokenId')
+    .lean();
+
+  return {
+    ...token,
+    peopleAhead,
+    servingToken: servingToken || null,
+    activeCounters: activeCounters || [],
+    estimatedWaitMinutes: token.waitEstimateMinutes !== undefined ? token.waitEstimateMinutes : null,
+  };
+}
+
+/**
  * GET /api/tokens/active
- * Get the user's currently active token (WAITING/CALLED/SERVING).
+ * Get the user's currently active token (WAITING/CALLED/SERVING) enriched with live queue transparency.
  */
 const getActiveToken = asyncHandler(async (req, res) => {
   const token = await Token.findOne({
@@ -144,7 +186,8 @@ const getActiveToken = asyncHandler(async (req, res) => {
     .populate('counterId', 'name number displayLabel')
     .lean({ virtuals: true });
 
-  return sendSuccess(res, { data: { token: token || null } });
+  const enriched = token ? await _enrichTokenWithLiveQueue(token) : null;
+  return sendSuccess(res, { data: { token: enriched } });
 });
 
 /**
@@ -169,7 +212,8 @@ const getById = asyncHandler(async (req, res) => {
     return sendNotFound(res, 'Token not found');
   }
 
-  return sendSuccess(res, { data: { token } });
+  const enriched = await _enrichTokenWithLiveQueue(token);
+  return sendSuccess(res, { data: { token: enriched } });
 });
 
 /**
@@ -245,11 +289,12 @@ const verifyQR = asyncHandler(async (req, res) => {
   try {
     parsed = verifyQRPayload(qrPayload);
   } catch (err) {
-    // Always return the same safe generic message regardless of failure reason
-    // Log internal reason server-side for debugging
-    if (process.env.NODE_ENV !== 'test') {
-      console.warn('[QR] Verification failure:', err._reason || err.message);
-    }
+    logger.security('QR_VERIFICATION_FAILURE', {
+      requestId: req.id,
+      reason: err._reason || err.message,
+      clientIp: req.ip,
+      userId: req.user ? req.user._id?.toString() : undefined,
+    });
     return sendBadRequest(res, 'QR verification failed');
   }
 
@@ -275,8 +320,12 @@ const verifyQR = asyncHandler(async (req, res) => {
   );
 
   if (!token) {
-    // Could be: wrong nonce (replay), already consumed, token terminated, or id mismatch
-    // Return safe generic error
+    logger.security('QR_VERIFICATION_FAILURE', {
+      requestId: req.id,
+      reason: 'nonce_replay_or_token_consumed_or_inactive',
+      clientIp: req.ip,
+      userId: req.user ? req.user._id?.toString() : undefined,
+    });
     return sendBadRequest(res, 'QR verification failed');
   }
 

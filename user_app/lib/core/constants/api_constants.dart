@@ -37,6 +37,8 @@ class ApiConstants {
   static const String roomJoinUser = 'join:user';
 
   static const String eventQueueUpdated = 'queue.updated';
+  static const String eventTokenCreated = 'token.created';
+  static const String eventTokenPositionUpdated = 'token.position_updated';
   static const String eventTokenCalled = 'token.called';
   static const String eventTokenServing = 'token.serving';
   static const String eventTokenCompleted = 'token.completed';
