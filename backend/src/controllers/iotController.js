@@ -24,6 +24,7 @@ const crowdValidation = [
   body('sensorId').optional().isString(),
 ];
 
+
 const scanQRValidation = [
   body('qrPayload')
     .isString()
@@ -136,6 +137,87 @@ const handleCrowd = asyncHandler(async (req, res) => {
 });
 
 /**
+ * POST /api/iot/crowd/absolute
+ * CCTV / vision-based counter sends the authoritative crowd count.
+ *
+ * Unlike /api/iot/crowd (which applies a +1/-1 delta from door sensors),
+ * this endpoint sets currentCrowd to the exact supplied value via $set.
+ * The camera is the source of truth for occupancy, so it corrects any
+ * drift accumulated by missed or duplicated ENTRY/EXIT events.
+ *
+ * Auth: x-iot-secret header
+ */
+const handleCrowdAbsolute = asyncHandler(async (req, res) => {
+  const { centerId, sensorId } = req.body;
+
+  // Defensive re-check: the validation chain already rejects non-integers.
+  const nextCount = Number(req.body.absoluteCount);
+  if (!Number.isInteger(nextCount) || nextCount < 0) {
+    return sendBadRequest(res, 'absoluteCount must be an integer >= 0');
+  }
+
+  // Verify the service center exists before writing
+  const center = await ServiceCenter.findById(centerId);
+  if (!center) return sendNotFound(res, 'Service center not found');
+
+  const previousCount = center.currentCrowd;
+
+  // Authoritative set — NOT $inc. crowdPercent/crowdStatus virtuals are
+  // derived from currentCrowd, so they update implicitly.
+  const updatedCenter = await ServiceCenter.findByIdAndUpdate(
+    centerId,
+    { $set: { currentCrowd: nextCount } },
+    { new: true, runValidators: true }
+  ).lean({ virtuals: true });
+
+  if (!updatedCenter) return sendNotFound(res, 'Service center not found');
+
+  // ── No FootfallEvent is written for absolute syncs ──────────────────────
+  // FootfallEvent.type is a fixed ENTRY/EXIT enum (deliberately left
+  // untouched), so a sync has no honest type to store. More importantly, the
+  // existing analytics readers do NOT filter on rawPayload.mode:
+  //   - analyticsController._getHourlyFootfall() counts every ENTRY/EXIT event
+  //     into hourly entries/exits and peakCount, with no mode guard.
+  //   - crowdController.getHistory() returns raw events for the trend charts.
+  // Writing a synthetic ENTRY/EXIT would therefore be indistinguishable from a
+  // real door event and would silently corrupt entry/exit totals and peak
+  // occupancy. Absolute syncs therefore leave the footfall audit trail
+  // untouched; the correction is still auditable via the previousCount
+  // returned in the HTTP response below and the ABSOLUTE_SYNC socket event.
+  const delta = nextCount - previousCount;
+  const timestamp = new Date();
+
+  // Same payload shape the frontend already consumes
+  // (CrowdStatus.fromJson reads centerId/currentCrowd/crowdPercent/
+  // crowdStatus/capacity and ignores event.type).
+  emitToCenter(centerId.toString(), 'crowd.updated', {
+    centerId,
+    currentCrowd: updatedCenter.currentCrowd,
+    crowdPercent: updatedCenter.crowdPercent,
+    crowdStatus: updatedCenter.crowdStatus,
+    capacity: updatedCenter.capacity,
+    event: {
+      type: 'ABSOLUTE_SYNC',
+      sensorId: sensorId || null,
+      timestamp,
+    },
+  });
+
+  return sendSuccess(res, {
+    message: 'Crowd count synchronized',
+    data: {
+      centerId,
+      currentCrowd: updatedCenter.currentCrowd,
+      crowdPercent: updatedCenter.crowdPercent,
+      crowdStatus: updatedCenter.crowdStatus,
+      capacity: updatedCenter.capacity,
+      previousCount,
+      delta,
+    },
+  });
+});
+
+/**
  * POST /api/iot/scan-qr
  * Physical scanner (ESP32 or kiosk) submits a scanned QR payload for verification.
  * Auth: x-iot-secret header (shared device secret — never embedded in Flutter app).
@@ -208,4 +290,12 @@ const scanQR = asyncHandler(async (req, res) => {
   });
 });
 
-module.exports = { handleRfid, handleCrowd, scanQR, rfidValidation, crowdValidation, scanQRValidation };
+module.exports = {
+  handleRfid,
+  handleCrowd,
+  handleCrowdAbsolute,
+  scanQR,
+  rfidValidation,
+  crowdValidation,
+  scanQRValidation,
+};

@@ -1,15 +1,20 @@
 import { io } from 'socket.io-client';
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL;
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:5000';
 
 let socket = null;
 
 export function getSocket() {
+  const token = localStorage.getItem('queueflow_admin_token');
+
   if (!socket) {
-    const token = localStorage.getItem('queueflow_admin_token');
     socket = io(SOCKET_URL, {
       transports: ['websocket', 'polling'],
-      auth: token ? { token } : undefined,
+      auth: (cb) => {
+        const currentToken = localStorage.getItem('queueflow_admin_token');
+        cb(currentToken ? { token: currentToken } : {});
+      },
+      autoConnect: Boolean(token),
       reconnection: true,
       reconnectionAttempts: 15,
       reconnectionDelay: 1000,
@@ -28,6 +33,12 @@ export function getSocket() {
     socket.on('connect_error', (error) => {
       console.warn('[Socket] Connection error:', error.message);
     });
+  }
+
+  // If a token is present and socket is not yet connected, update auth and connect
+  if (token && !socket.connected) {
+    socket.auth = { token };
+    socket.connect();
   }
 
   return socket;

@@ -12,6 +12,7 @@ import {
   Layers,
   UserCheck,
   Cpu,
+  Users,
 } from 'lucide-react';
 
 export default function Sidebar({ isOpen = true, onClose = () => {} }) {
@@ -34,6 +35,12 @@ export default function Sidebar({ isOpen = true, onClose = () => {} }) {
           label: 'Live Operations',
           icon: LayoutDashboard,
           badge: 'REALTIME',
+        },
+        {
+          to: '/crowd-monitoring',
+          label: 'Crowd Monitoring',
+          icon: Users,
+          badge: 'CCTV',
         },
         {
           to: '/resource-hub',

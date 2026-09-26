@@ -13,6 +13,7 @@ import CounterDisplay from './pages/CounterDisplay';
 import Services from './pages/Services';
 import OperatorPortal from './pages/OperatorPortal';
 import ResourceHub from './pages/ResourceHub';
+import CrowdMonitoring from './pages/CrowdMonitoring';
 import { useAuth } from './context/AuthContext';
 
 function RootRedirect() {
@@ -110,6 +111,17 @@ export default function App() {
                 <ProtectedRoute>
                   <AdminLayout>
                     <ResourceHub />
+                  </AdminLayout>
+                </ProtectedRoute>
+              }
+            />
+
+            <Route
+              path="/crowd-monitoring"
+              element={
+                <ProtectedRoute>
+                  <AdminLayout>
+                    <CrowdMonitoring />
                   </AdminLayout>
                 </ProtectedRoute>
               }
