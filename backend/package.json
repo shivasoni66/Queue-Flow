@@ -26,6 +26,7 @@
     "test:operator": "node test/phase_tier2_operator.test.js",
     "test:resource-hub": "node test/phase_tier2_resource_hub.test.js",
     "test:ewt": "node test/phase_tier3_context_ewt.test.js",
+    "test:ml": "node test/phase_tier3_ml_predictor.test.js",
     "test:all": "node test/smoke.test.js && node test/socket_security.test.js && node test/auth_security.test.js && node test/api_security.test.js && node test/qr_security.test.js && node test/distributed_rate_limiting.test.js && node test/socket_redis_adapter.test.js && node test/http_security.test.js && node test/env_config.test.js && node test/logging_security.test.js && node test/health_readiness.test.js && node test/resilience_shutdown.test.js && node test/notification_security.test.js && node test/phase_d_channels.test.js && node test/phase_2_live_tracking.test.js && node test/phase_3_notifications.test.js && node test/phase_tier3_context_ewt.test.js && node test/phase_tier3_ml_predictor.test.js",
     "seed": "node scripts/seed.js",
     "seed:clear": "node scripts/seed.js --clear"
