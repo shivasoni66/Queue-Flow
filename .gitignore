@@ -48,3 +48,7 @@ yarn-error.log*
 *.sw?
 .DS_Store
 Thumbs.db
+
+# Crowd Monitor
+crowd_monitor/__pycache__/
+crowd_monitor/*.pt
