@@ -382,6 +382,19 @@ async function callNext({ counterId, centerId, adminId }) {
     .populate('userId', 'name email preferences');
 
   if (!nextToken) {
+    // Verify actual WAITING count before touching Queue document.
+    // Only correct waitingCount if truly zero WAITING tokens exist for this service.
+    const actualWaitingCount = await Token.countDocuments({
+      centerId,
+      serviceId: counter.serviceId._id,
+      status: 'WAITING',
+    });
+    if (actualWaitingCount === 0) {
+      await Queue.updateOne(
+        { centerId, serviceId: counter.serviceId._id, date: getTodayDateString() },
+        { $set: { waitingCount: 0 } }
+      );
+    }
     return null; // Queue is empty — no token to call
   }
 
@@ -784,21 +797,38 @@ async function getQueueStatus(centerId) {
     .populate('currentTokenId', 'tokenCode status')
     .lean();
 
-  const result = queues.map((q) => ({
-    queueId: q._id,
-    service: q.serviceId,
-    status: q.status,
-    waitingCount: q.waitingCount,
-    activeCount: q.activeCount,
-    completedCount: q.completedCount,
-    abandonedCount: q.abandonedCount,
-    totalIssued: q.totalIssued,
-    avgServiceTimeSeconds: q.avgServiceTimeSeconds,
-    lastIssuedNumber: q.lastIssuedNumber,
-    counters: counters.filter(
-      (c) => c.serviceId && c.serviceId._id.toString() === q.serviceId._id.toString()
-    ),
-  }));
+  // Calculate actual waiting counts from the Token collection instead of trusting
+  // the cached waitingCount on Queue, which can drift due to out-of-band changes.
+  const result = await Promise.all(
+    queues.map(async (q) => {
+      const actualWaitingCount = await Token.countDocuments({
+        centerId: q.centerId,
+        serviceId: q.serviceId._id,
+        status: 'WAITING',
+      });
+
+      // If the cached value has drifted, correct it in the background.
+      if (q.waitingCount !== actualWaitingCount) {
+        await Queue.updateOne({ _id: q._id }, { $set: { waitingCount: actualWaitingCount } });
+      }
+
+      return {
+        queueId: q._id,
+        service: q.serviceId,
+        status: q.status,
+        waitingCount: actualWaitingCount,
+        activeCount: q.activeCount,
+        completedCount: q.completedCount,
+        abandonedCount: q.abandonedCount,
+        totalIssued: q.totalIssued,
+        avgServiceTimeSeconds: q.avgServiceTimeSeconds,
+        lastIssuedNumber: q.lastIssuedNumber,
+        counters: counters.filter(
+          (c) => c.serviceId && c.serviceId._id.toString() === q.serviceId._id.toString()
+        ),
+      };
+    })
+  );
 
   return result;
 }
