@@ -13,6 +13,8 @@ import 'services/notification_service.dart';
 import 'utils/join_link_service.dart';
 import 'utils/widgets/join_link_listener.dart';
 
+import 'widgets/global_floating_actions.dart';
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -102,7 +104,9 @@ class QueueFlowApp extends ConsumerWidget {
       // already signed in) are what turn it into a destination, because a
       // `builder` context here has no router or overlay in scope.
       builder: (context, child) => JoinLinkListener(
-        child: child ?? const SizedBox.shrink(),
+        child: GlobalFloatingActions(
+          child: child ?? const SizedBox.shrink(),
+        ),
       ),
     );
   }

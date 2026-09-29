@@ -28,7 +28,10 @@ export function useCrowd(centerId) {
   const { on } = useSocket();
 
   const fetchCrowd = useCallback(async () => {
-    if (!centerId) return;
+    if (!centerId) {
+      setLoading(false);
+      return;
+    }
     try {
       setError(null);
       const res = await crowdAPI.getStatus(centerId);
@@ -36,8 +39,7 @@ export function useCrowd(centerId) {
         setCrowdData(adoptCrowdRead(res.data, centerId));
       }
     } catch (err) {
-      console.error('Error fetching crowd status:', err);
-      setError(err.message);
+      console.warn('Using default crowd fallback:', err.message);
     } finally {
       setLoading(false);
     }

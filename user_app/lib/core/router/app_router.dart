@@ -20,6 +20,7 @@ import '../../screens/history/history_screen.dart';
 import '../../screens/notifications/notifications_screen.dart';
 import '../../screens/scan/scan_screen.dart';
 import '../../screens/profile/profile_screen.dart';
+import '../../screens/support/support_chat_screen.dart';
 import '../../utils/join_link_service.dart';
 import '../../utils/qr_payload_parser.dart';
 
@@ -433,6 +434,11 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/scan',
         parentNavigatorKey: rootNavigatorKey,
         builder: (context, state) => const ScanScreen(),
+      ),
+      GoRoute(
+        path: '/support-chat',
+        parentNavigatorKey: rootNavigatorKey,
+        builder: (context, state) => const SupportChatScreen(),
       ),
       // ─── CANONICAL CUSTOMER QUEUE-JOIN LINK ───────────────────────
       //

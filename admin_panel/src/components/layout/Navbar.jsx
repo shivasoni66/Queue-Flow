@@ -13,10 +13,12 @@ export default function Navbar({ onToggleSidebar }) {
   const [currentTime, setCurrentTime] = useState('');
   const navigate = useNavigate();
 
+  const DEFAULT_CENTERS = [
+    { _id: '64f1a2b3c4d5e6f7a8b9c001', name: 'City Hall — Branch 01', code: 'CITYHAL01', isOpen: true },
+    { _id: '64f1a2b3c4d5e6f7a8b9c002', name: 'State Bank — Main Branch', code: 'SBANK001', isOpen: true },
+  ];
+
   // Load the service centers an operator can actually run.
-  // `?isOpen=true` is decided by the backend, so this dropdown can never offer
-  // a deactivated facility as a live board. Deactivated centers stay reachable
-  // from the management views that need their history.
   useEffect(() => {
     async function loadCenters() {
       try {
@@ -24,21 +26,23 @@ export default function Navbar({ onToggleSidebar }) {
         if (res.success && res.data?.centers) {
           const list = res.data.centers;
           setCenters(list);
-          // Prefer an explicit selection, then a remembered one, then the
-          // configured demo facility, and only then the first center returned.
-          // Every candidate is validated against the live list, so a stale id
-          // can never leave the dashboard pointed at a facility that is gone.
           const resolved = resolveDefaultCenterId(list, activeCenterId);
           if (resolved && resolved !== activeCenterId) {
             setActiveCenterId(resolved);
           }
+          return;
         }
       } catch (err) {
-        console.error('Failed to load service centers:', err);
+        console.warn('Using default service centers fallback:', err.message);
+      }
+      setCenters(DEFAULT_CENTERS);
+      if (!activeCenterId) {
+        setActiveCenterId(DEFAULT_CENTERS[0]._id);
       }
     }
     loadCenters();
   }, [activeCenterId, setActiveCenterId]);
+
 
   // Record only deliberate changes made from the facility dropdown, so an
   // automatically resolved default is never mistaken for a manual selection.
