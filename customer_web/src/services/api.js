@@ -1,7 +1,32 @@
 import axios from 'axios';
 import { storage } from './storage';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+/**
+ * Resolve the API origin from the build-time environment.
+ *
+ * `VITE_API_URL` is the API ORIGIN. The `/api` prefix is appended below when
+ * the axios instance is created, so a redundant trailing `/api` is stripped
+ * here. Without that, a value of `https://host/api` produced a baseURL of
+ * `https://host/api/api` and every request — including /auth/login — 404'd.
+ *
+ * The development fallback is gated behind `import.meta.env.DEV` so Vite can
+ * substitute `false` and tree-shake `localhost:5000` out of production
+ * bundles entirely. A production build with no configured origin is a config
+ * error, so it is reported loudly rather than silently falling back.
+ */
+const DEV_FALLBACK_ORIGIN = import.meta.env.DEV ? 'http://localhost:5000' : '';
+
+const API_BASE_URL = (import.meta.env.VITE_API_URL || DEV_FALLBACK_ORIGIN)
+  .trim()
+  .replace(/\/+$/, '') // drop trailing slashes
+  .replace(/\/api$/, ''); // drop a redundant /api suffix (the prefix is added below)
+
+if (import.meta.env.PROD && !API_BASE_URL) {
+  console.error(
+    '[API] VITE_API_URL is not set in this production build. Set it in .env.production ' +
+      'to the API ORIGIN (e.g. https://your-api-host) WITHOUT a trailing /api.'
+  );
+}
 
 const api = axios.create({
   baseURL: `${API_BASE_URL}/api`,

@@ -86,3 +86,19 @@ describe('Customer API & Authoritative Token Security (Requirements 7, 8, 9, 16)
     expect(unauthorizedEventFired).toBe(true);
   });
 });
+
+describe('API base URL resolution (no doubled /api segment)', () => {
+  it('builds a baseURL with exactly one /api prefix, so /auth/login is a real route', () => {
+    const baseURL = api.defaults.baseURL;
+
+    // Backend mounts auth at /api/auth (backend/server.js). A doubled prefix
+    // produced /api/api/auth/login, which 404s and breaks login entirely.
+    expect(baseURL).not.toMatch(/\/api\/api/);
+    expect(baseURL).toMatch(/\/api$/);
+
+    // The composed login URL must match the real backend route exactly.
+    const loginURL = `${baseURL}/auth/login`;
+    expect(loginURL).not.toContain('/api/api/');
+    expect(loginURL.endsWith('/api/auth/login')).toBe(true);
+  });
+});

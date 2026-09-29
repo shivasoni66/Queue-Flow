@@ -1,9 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { render, screen, fireEvent, waitFor, renderHook, act } from '@testing-library/react';
 import React from 'react';
 import { storage, MAX_CACHE_AGE_MS } from '../services/storage';
 import { onSocketStatus, onSocketReconnect, getSocketStatus } from '../services/socket';
 import { tokenAPI, swapAPI, documentAPI, queueAPI, serviceCenterAPI, serviceAPI } from '../services/api';
+import { purgeStaleServiceWorkers } from '../services/serviceWorkerCleanup';
 import { ConnectionIndicator } from '../components/ConnectionIndicator';
 import { OfflineBanner } from '../components/OfflineBanner';
 import { TokenCard } from '../components/TokenCard';
@@ -494,10 +497,80 @@ describe('Tier 4 / Feature 6 — Offline-Resilient Web State (All 35 Requirement
     unsub();
   });
 
-  // ─── 29. Service worker/static asset behavior ───────────────────────────────
-  it('29. service worker/static asset behavior: sw.js ignores /api and /socket.io requests', async () => {
-    // Verified by architectural audit of public/sw.js lines 41-45
-    expect(true).toBe(true);
+  // ─── 29. Service worker is retired and actively evicted ─────────────────────
+  it('29. service worker: nothing is registered, and the shipped sw.js never intercepts a fetch', async () => {
+    const swSource = readFileSync(resolve(process.cwd(), 'public/sw.js'), 'utf-8');
+
+    // A real .js file must remain at the old script URL. Cloudflare Pages falls
+    // back to index.html for unmatched paths, so a DELETED sw.js is served as
+    // 200 text/html, which makes the browser's update check abort and leaves the
+    // broken worker installed and controlling.
+    expect(swSource.length).toBeGreaterThan(0);
+
+    // Strip comments so the assertions below test executable CODE, not the
+    // prose in sw.js that documents the failure it replaces.
+    const swCode = swSource
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n')
+      .map((line) => line.replace(/(^|[^:'"`\\])\/\/.*$/, '$1'))
+      .join('\n');
+
+    // It must be a cleanup shim, never a cache: no 'fetch' listener means the
+    // worker can never respond to a request, so SPA navigations, API calls and
+    // Socket.IO all pass through to the network untouched.
+    expect(swCode).not.toMatch(/addEventListener\(\s*['"`]fetch['"`]/);
+    expect(swCode).not.toMatch(/respondWith|CACHE_NAME|cache\.addAll/);
+
+    // It evicts the retired app shell and unregisters itself.
+    expect(swCode).toMatch(/caches\.delete/);
+    expect(swCode).toMatch(/registration\.unregister/);
+
+    // No deployment-specific hostnames in the service-worker logic.
+    expect(swCode).not.toMatch(/pages\.dev|localhost/);
+
+    // Fresh visitors never install a worker.
+    const mainSource = readFileSync(resolve(process.cwd(), 'src/main.jsx'), 'utf-8');
+    expect(mainSource).not.toMatch(/serviceWorker\.register/);
+
+    // The app also purges a legacy worker that somehow outlives the shim.
+    const deletedCaches = [];
+    const unregisterSpy = vi.fn().mockResolvedValue(true);
+    Object.defineProperty(globalThis, 'caches', {
+      configurable: true,
+      value: {
+        keys: vi.fn().mockResolvedValue(['queueflow-customer-shell-v1', 'stale-old-build']),
+        delete: vi.fn((name) => {
+          deletedCaches.push(name);
+          return Promise.resolve(true);
+        }),
+      },
+    });
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: {
+        controller: { scriptURL: 'https://customer.shivasoni.me/sw.js' },
+        getRegistrations: vi.fn().mockResolvedValue([{ unregister: unregisterSpy }]),
+        register: vi.fn(),
+      },
+    });
+
+    const result = await purgeStaleServiceWorkers();
+
+    // Every stale cache is removed by enumeration, including the old shell cache.
+    expect(deletedCaches).toContain('queueflow-customer-shell-v1');
+    expect(deletedCaches).toContain('stale-old-build');
+    expect(result.cachesDeleted).toBe(2);
+
+    // The retired worker is unregistered so the user is not left controlled by it.
+    expect(unregisterSpy).toHaveBeenCalledTimes(1);
+    expect(result.unregistered).toBe(1);
+    expect(result.wasControlled).toBe(true);
+
+    // Nothing registers a replacement worker.
+    expect(navigator.serviceWorker.register).not.toHaveBeenCalled();
+
+    delete navigator.serviceWorker;
+    delete globalThis.caches;
   });
 
   // ─── 30. No sensitive data in browser cache ─────────────────────────────────
