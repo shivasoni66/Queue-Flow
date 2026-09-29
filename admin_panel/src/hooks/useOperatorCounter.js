@@ -56,6 +56,34 @@ function payloadCounterId(payload) {
 }
 
 /**
+ * Remove repeated entries from a waiting-token list.
+ *
+ * The backend already de-duplicates (see `getWaitingTokensForQueue`), but the
+ * reported symptom was the same token code appearing twice in "Next in Line",
+ * so the panel refuses to render a repeat even if a payload ever contains one.
+ * Identity is the token's `_id`; the code is a second pass, and the first
+ * occurrence (the oldest, because the list is FIFO) always wins.
+ */
+export function dedupeWaitingTokens(list) {
+  const seenIds = new Set();
+  const seenCodes = new Set();
+  const out = [];
+
+  for (const token of list || []) {
+    if (!token) continue;
+    const id = token._id ? String(token._id) : null;
+    const code = token.tokenCode || null;
+    if (id && seenIds.has(id)) continue;
+    if (code && seenCodes.has(code)) continue;
+    if (id) seenIds.add(id);
+    if (code) seenCodes.add(code);
+    out.push(token);
+  }
+
+  return out;
+}
+
+/**
  * Should this realtime event be allowed to trigger a refetch of the counter
  * currently on screen?
  *
@@ -213,9 +241,10 @@ export default function useOperatorCounter({ centerId, on, setActiveCenterId }) 
         setCenter(data.center || loadedCounter.centerId || null);
         setService(data.service || loadedCounter.serviceId || null);
         setQueue(data.queue || null);
-        setWaitingTokens(Array.isArray(data.waitingTokens) ? data.waitingTokens : []);
+        const uniqueTokens = dedupeWaitingTokens(data.waitingTokens);
+        setWaitingTokens(uniqueTokens);
         setWaitingCount(
-          typeof data.waitingCount === 'number' ? data.waitingCount : (data.waitingTokens || []).length
+          typeof data.waitingCount === 'number' ? data.waitingCount : uniqueTokens.length
         );
         setEstimatedWaitMinutes(
           typeof data.estimatedWaitMinutes === 'number' ? data.estimatedWaitMinutes : null

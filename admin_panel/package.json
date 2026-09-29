@@ -12,8 +12,10 @@
     "test:phase-c": "node --env-file=.env.test test/phase_c_service_mgmt.test.js",
     "test:crowd": "node --test test/crowd_state.test.js",
     "test:widget": "vitest run --environment jsdom test/crowd_widget_render.test.jsx",
+    "test:operator-panel": "vitest run --environment jsdom test/operator_panel_scope.test.jsx",
     "test:geofence2": "node --test test/phase2_call_next_outcome.test.js",
-    "test:theme": "node --test test/theme.test.js"
+    "test:theme": "node --test test/theme.test.js",
+    "test:analytics": "node --test test/analytics_screen.test.js"
   },
   "dependencies": {
     "axios": "^1.7.4",

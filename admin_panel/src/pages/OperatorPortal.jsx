@@ -24,7 +24,6 @@ import {
   DoorOpen,
   X,
   UserCog,
-  Activity,
 } from 'lucide-react';
 
 /** Status → colour ramp, shared by the counter badge and the status buttons. */
@@ -482,7 +481,7 @@ export default function OperatorPortal() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.68rem', color: 'var(--text-secondary)', letterSpacing: '0.05em' }}>
                 <Users size={13} /> PEOPLE WAITING
               </div>
-              <div style={{ fontSize: '1.9rem', fontWeight: 800, color: 'var(--text-primary)', marginTop: 4 }}>
+              <div data-testid="people-waiting" style={{ fontSize: '1.9rem', fontWeight: 800, color: 'var(--text-primary)', marginTop: 4 }}>
                 {op.waitingCount}
               </div>
             </div>
@@ -490,7 +489,7 @@ export default function OperatorPortal() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.68rem', color: 'var(--text-secondary)', letterSpacing: '0.05em' }}>
                 <Clock size={13} /> EST WAIT
               </div>
-              <div style={{ fontSize: '1.9rem', fontWeight: 800, color: 'var(--color-primary)', marginTop: 4 }}>
+              <div data-testid="est-wait" style={{ fontSize: '1.9rem', fontWeight: 800, color: 'var(--color-primary)', marginTop: 4 }}>
                 {op.estimatedWaitMinutes === null ? '—' : `${op.estimatedWaitMinutes}m`}
               </div>
             </div>

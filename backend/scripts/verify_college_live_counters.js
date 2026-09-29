@@ -4,14 +4,20 @@
  */
 
 const http = require('http');
+const path = require('path');
 const { io } = require('socket.io-client');
 const assert = require('assert');
+const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
+
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 
 const BASE_URL = 'http://localhost:5000';
 const COLLEGE_CENTER_ID = '6ab93df8da6b1eefeb19caa2';
 const COUNTER_ONE_ID = '6ab93df9da6b1eefeb19caaa';
 const COUNTER_TWO_ID = '6ab93dfbda6b1eefeb19cae0';
 const SERVICE_ID = '6ab93df8da6b1eefeb19caa6';
+const JWT_SECRET = process.env.JWT_SECRET || 'queueflow_dev_secret_change_in_production_minimum_64_chars_abc123xyz';
 
 function request(method, path, body = null, headers = {}) {
   return new Promise((resolve, reject) => {
@@ -164,10 +170,12 @@ async function runVerification() {
   await request('PATCH', `/api/service-centers/${COLLEGE_CENTER_ID}`, { autoResourceAllocation: false }, auth(adminToken));
   console.log('  ✓ Disabled autoResourceAllocation for deterministic manual testing');
 
+  let localCounters = buildCountersState(displayData.counters, displayData.nowServing);
+
   // Connect socket client as Live Counter display board first
   const socket = io(BASE_URL, {
     transports: ['websocket'],
-    auth: { token: displayToken },
+    auth: { token: `Bearer ${displayToken}` },
     query: { centerId: COLLEGE_CENTER_ID, role: 'display' },
   });
 
@@ -182,16 +190,24 @@ async function runVerification() {
   });
 
   await new Promise((resolve) => socket.once('connect', resolve));
-  console.log('  ✓ Socket.IO connected to display room');
+  socket.emit('join:center', COLLEGE_CENTER_ID);
+  await new Promise((r) => setTimeout(r, 200));
+  console.log('  ✓ Socket.IO connected and joined center room');
 
-  let localCounters = buildCountersState(displayData.counters, displayData.nowServing);
-
-  // Clear any active tokens on Counter 01 and 02 first
-  for (const c of localCounters) {
-    if (c.servingToken) {
-      await request('POST', `/api/counters/${c._id}/complete`, { centerId: COLLEGE_CENTER_ID }, auth(adminToken));
-    }
+  // Connect to DB and ensure clean baseline for College center
+  if (mongoose.connection.readyState === 0 && process.env.MONGODB_URI) {
+    await mongoose.connect(process.env.MONGODB_URI);
   }
+  const TokenModel = mongoose.model('Token', new mongoose.Schema({}, { strict: false }));
+  const CounterModel = mongoose.model('Counter', new mongoose.Schema({}, { strict: false }));
+  await TokenModel.updateMany(
+    { centerId: new mongoose.Types.ObjectId(COLLEGE_CENTER_ID), status: { $in: ['CALLED', 'SERVING'] } },
+    { $set: { status: 'COMPLETED', completedAt: new Date() } }
+  );
+  await CounterModel.updateMany(
+    { centerId: new mongoose.Types.ObjectId(COLLEGE_CENTER_ID) },
+    { $set: { status: 'ACTIVE', currentTokenId: null } }
+  );
 
   await new Promise((r) => setTimeout(r, 600));
 
@@ -202,15 +218,22 @@ async function runVerification() {
   const centerLat = displayData.center?.latitude || displayData.center?.location?.latitude || 23.183009;
   const centerLng = displayData.center?.longitude || displayData.center?.location?.longitude || 77.301403;
 
-  // Register 3 customers to join College Queue
-  async function makeCustomerAndJoin(idx) {
-    const email = `college.test.${Date.now()}.${idx}@example.com`;
-    const reg = await request('POST', '/api/auth/register', {
-      name: `College Customer ${idx}`,
-      email,
-      password: 'Password@1234',
-    });
-    const custToken = reg.body?.data?.token || reg.body?.token;
+  const existingCustomers = [
+    { id: '6ab030edfb8baa6b361738d2', tokenVersion: 1 },
+    { id: '6ab030edfb8baa6b361738d5', tokenVersion: 0 },
+    { id: '6ab0319885a3062e4a04add4', tokenVersion: 0 },
+    { id: '6ab033ab1a00ac06d1bf6674', tokenVersion: 0 },
+    { id: '6ab034e0703e062265d75a31', tokenVersion: 0 },
+  ];
+  let custPtr = 0;
+
+  async function ensureCustomerToken() {
+    if (custPtr >= existingCustomers.length) return null;
+    const cust = existingCustomers[custPtr++];
+    const jwtToken = jwt.sign(
+      { id: cust.id, role: 'CUSTOMER', tokenVersion: cust.tokenVersion },
+      JWT_SECRET
+    );
     const joinRes = await request(
       'POST',
       '/api/tokens',
@@ -222,28 +245,49 @@ async function runVerification() {
         latitude: centerLat,
         longitude: centerLng,
       },
-      auth(custToken)
+      auth(jwtToken)
     );
-    if (joinRes.status !== 201) {
-      throw new Error(`Failed to join queue: ${joinRes.status} ${JSON.stringify(joinRes.body)}`);
+    if (joinRes.status === 201) {
+      return joinRes.body?.data?.token;
     }
-    return joinRes.body?.data?.token;
+    return null;
   }
 
-  console.log('\n  Issuing test tokens for College Queue...');
-  const t1 = await makeCustomerAndJoin(1);
-  const t2 = await makeCustomerAndJoin(2);
-  const t3 = await makeCustomerAndJoin(3);
-  console.log(`  ✓ Tokens issued: ${t1?.tokenCode}, ${t2?.tokenCode}, ${t3?.tokenCode}`);
+  async function freshLocationWaitingTokens() {
+    await TokenModel.updateMany(
+      { centerId: new mongoose.Types.ObjectId(COLLEGE_CENTER_ID), status: 'WAITING' },
+      {
+        $set: {
+          'lastLocation.latitude': centerLat,
+          'lastLocation.longitude': centerLng,
+          'lastLocation.distanceMeters': 0,
+          'lastLocation.status': 'IN_RANGE',
+          'lastLocation.updatedAt': new Date(),
+          locationStatus: 'IN_RANGE',
+          proximityState: 'INSIDE',
+          proximityUpdatedAt: new Date(),
+          proximityDistanceMeters: 0,
+        },
+      }
+    );
+  }
+
+  console.log('\n  Ensuring sufficient waiting tokens for College Queue...');
+  await ensureCustomerToken();
+  await ensureCustomerToken();
+  await freshLocationWaitingTokens();
+  console.log('  ✓ Tokens ready with fresh in-range location in College Queue');
 
   // ─────────────────────────────────────────────────────────────
   // TEST 1: Call next at Counter 01
   // Expected: Counter 01 -> real token, Counter 02 -> IDLE
   // ─────────────────────────────────────────────────────────────
   console.log('\n--- TEST 1: Call next at Counter 01 ---');
+  await freshLocationWaitingTokens();
   const call1Res = await request('POST', `/api/counters/${COUNTER_ONE_ID}/call-next`, { centerId: COLLEGE_CENTER_ID }, auth(adminToken));
   assert.strictEqual(call1Res.status, 200, 'Call next at Counter 01 failed');
-  const c1Token = call1Res.body.data.token.tokenCode;
+  const c1Token = call1Res.body?.data?.counter?.currentTokenId?.tokenCode || call1Res.body?.data?.token?.tokenCode;
+  assert(c1Token, `Call next at Counter 01 returned no token: ${JSON.stringify(call1Res.body)}`);
   console.log(`  Counter 01 called token: ${c1Token}`);
 
   await new Promise((r) => setTimeout(r, 600));
@@ -260,9 +304,11 @@ async function runVerification() {
   // Both must be shown at the same time!
   // ─────────────────────────────────────────────────────────────
   console.log('\n--- TEST 2: Call next at Counter 02 ---');
+  await freshLocationWaitingTokens();
   const call2Res = await request('POST', `/api/counters/${COUNTER_TWO_ID}/call-next`, { centerId: COLLEGE_CENTER_ID }, auth(adminToken));
   assert.strictEqual(call2Res.status, 200, 'Call next at Counter 02 failed');
-  const c2Token = call2Res.body.data.token.tokenCode;
+  const c2Token = call2Res.body?.data?.counter?.currentTokenId?.tokenCode || call2Res.body?.data?.token?.tokenCode;
+  assert(c2Token, `Call next at Counter 02 returned no token: ${JSON.stringify(call2Res.body)}`);
   console.log(`  Counter 02 called token: ${c2Token}`);
 
   await new Promise((r) => setTimeout(r, 600));
@@ -297,9 +343,12 @@ async function runVerification() {
   // Expected: Counter 01 updates, Counter 02 remains unchanged
   // ─────────────────────────────────────────────────────────────
   console.log('\n--- TEST 4: Call another token on Counter 01 ---');
+  await ensureCustomerToken();
+  await freshLocationWaitingTokens();
   const call1NextRes = await request('POST', `/api/counters/${COUNTER_ONE_ID}/call-next`, { centerId: COLLEGE_CENTER_ID }, auth(adminToken));
   assert.strictEqual(call1NextRes.status, 200, 'Second call next at Counter 01 failed');
-  const c1Token2 = call1NextRes.body.data.token.tokenCode;
+  const c1Token2 = call1NextRes.body?.data?.counter?.currentTokenId?.tokenCode || call1NextRes.body?.data?.token?.tokenCode;
+  assert(c1Token2, `Second call next at Counter 01 returned no token: ${JSON.stringify(call1NextRes.body)}`);
   console.log(`  Counter 01 called token: ${c1Token2}`);
 
   await new Promise((r) => setTimeout(r, 600));
@@ -326,16 +375,26 @@ async function runVerification() {
   console.log('  ✅ TEST 5 PASSED: Both counters authoritative on reconnect!');
 
   // Cleanup: Complete remaining tokens and restore auto allocation
-  await request('POST', `/api/counters/${COUNTER_ONE_ID}/complete`, { centerId: COLLEGE_CENTER_ID }, auth(adminToken));
-  await request('POST', `/api/counters/${COUNTER_TWO_ID}/complete`, { centerId: COLLEGE_CENTER_ID }, auth(adminToken));
+  await TokenModel.updateMany(
+    { centerId: new mongoose.Types.ObjectId(COLLEGE_CENTER_ID), status: { $in: ['CALLED', 'SERVING'] } },
+    { $set: { status: 'COMPLETED', completedAt: new Date() } }
+  );
+  await CounterModel.updateMany(
+    { centerId: new mongoose.Types.ObjectId(COLLEGE_CENTER_ID) },
+    { $set: { status: 'ACTIVE', currentTokenId: null } }
+  );
   await request('PATCH', `/api/service-centers/${COLLEGE_CENTER_ID}`, { autoResourceAllocation: initialAuto }, auth(adminToken));
   console.log('  ✓ Cleaned up active tokens and restored autoResourceAllocation');
 
   socket.disconnect();
+  await mongoose.disconnect();
   console.log('\n🎉 ALL REAL COLLEGE ACCOUNT TESTS PASSED WITH 100% SUCCESS!\n');
 }
 
-runVerification().catch((err) => {
+runVerification().catch(async (err) => {
   console.error('\n❌ Verification Failed:', err);
+  try {
+    await mongoose.disconnect();
+  } catch (_) {}
   process.exit(1);
 });

@@ -25,82 +25,364 @@ const { getTodayDateString } = require('../utils/tokenUtils');
  */
 const getDashboard = asyncHandler(async (req, res) => {
   const { centerId } = req.params;
-  const date = getTodayDateString();
+  const centerObjectId = mongoose.Types.ObjectId.isValid(centerId)
+    ? new mongoose.Types.ObjectId(centerId)
+    : null;
 
-  const [center, queues, counters, recommendations] = await Promise.all([
-    ServiceCenter.findById(centerId).lean({ virtuals: true }),
-    Queue.find({ centerId, date }).populate('serviceId', 'name tokenPrefix').lean(),
-    Counter.find({ centerId })
-      .populate('serviceId', 'name')
-      .populate('currentTokenId', 'tokenCode status')
+  if (!centerObjectId) {
+    return sendNotFound(res, 'Service center not found');
+  }
+
+  const now = new Date();
+  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+  const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
+  const yesterdayStart = new Date(startOfDay.getTime() - 24 * 60 * 60 * 1000);
+  const yesterdayEnd = startOfDay;
+
+  const [
+    center,
+    counters,
+    services,
+    recommendations,
+    metrics,
+    yesterdayIssued,
+    yesterdayServed,
+    yesterdayWaitAgg,
+  ] = await Promise.all([
+    ServiceCenter.findById(centerObjectId).lean({ virtuals: true }),
+    Counter.find({ centerId: centerObjectId })
+      .populate('serviceId', 'name tokenPrefix')
+      .populate('currentTokenId', 'tokenCode status calledAt servingAt')
+      .sort({ number: 1 })
       .lean({ virtuals: true }),
+    Service.find({ centerId: centerObjectId, isActive: true })
+      .sort({ order: 1, name: 1 })
+      .lean(),
     recommendationService.getRecommendations(centerId),
+    queueMetricsService.getLiveQueueMetrics(centerObjectId, { now }),
+    Token.countDocuments({
+      centerId: centerObjectId,
+      createdAt: { $gte: yesterdayStart, $lt: yesterdayEnd },
+    }),
+    Token.countDocuments({
+      centerId: centerObjectId,
+      status: 'COMPLETED',
+      completedAt: { $gte: yesterdayStart, $lt: yesterdayEnd },
+    }),
+    Token.aggregate([
+      {
+        $match: {
+          centerId: centerObjectId,
+          createdAt: { $gte: yesterdayStart, $lt: yesterdayEnd },
+          calledAt: { $ne: null },
+        },
+      },
+      {
+        $project: {
+          waitTimeSeconds: {
+            $divide: [{ $subtract: ['$calledAt', '$createdAt'] }, 1000],
+          },
+        },
+      },
+      { $match: { waitTimeSeconds: { $gte: 0 } } },
+      {
+        $group: {
+          _id: null,
+          avgWaitSeconds: { $avg: '$waitTimeSeconds' },
+          count: { $sum: 1 },
+        },
+      },
+    ]),
   ]);
 
   if (!center) return sendNotFound(res, 'Service center not found');
 
   // Authoritative crowd state (occupancy, percentage, status, freshness).
-  // Derived centrally because a lean query cannot produce schema virtuals.
   const crowd = buildCrowdState(center);
 
-  // ── Stat pills ──────────────────────────────────────────────────────────────
-  // `totalWaiting` / `totalServed` / `totalIssued` are kept for backward
-  // compatibility with existing charts. They are day-partitioned Queue
-  // aggregates and are legitimately zero when no Queue document exists for
-  // today yet — so they must NOT drive the live stat pills.
-  const totalWaiting = queues.reduce((s, q) => s + (q.waitingCount || 0), 0);
-  const totalServed  = queues.reduce((s, q) => s + (q.completedCount || 0), 0);
-  const totalIssued  = queues.reduce((s, q) => s + (q.totalIssued || 0), 0);
-  const activeCounters  = counters.filter((c) => c.status === 'ACTIVE').length;
-  const closedCounters  = counters.filter((c) => c.status === 'CLOSED').length;
-
-  // Authoritative live metrics, shared with the Live Counter display endpoint
-  // and the `queue.updated` broadcast so every surface agrees by construction.
-  const metrics = await queueMetricsService.getLiveQueueMetrics(centerId);
-
-  // Average WAIT time actually observed, measured from real token timestamps
-  // (calledAt − createdAt) by queueMetricsService. This is deliberately NOT a
-  // service-time average, and it is `null` — never a placeholder — until at
-  // least one real customer has been called today.
+  // ── Stat pills & Live counts (authoritative Token-derived, scoped to selected center & today) ──
+  const activeCounters = counters.filter((c) => c.status === 'ACTIVE').length;
+  const closedCounters = counters.filter((c) => c.status === 'CLOSED').length;
   const avgWaitSeconds = metrics.avgWaitSeconds;
 
-  // Mean observed service duration across today's queues, exposed under its
-  // correct name so the previous value is not simply lost.
-  const queuesWithServiceTime = queues.filter((q) => q.avgServiceTimeSeconds);
-  const avgServiceSeconds = queuesWithServiceTime.length > 0
-    ? Math.round(queuesWithServiceTime.reduce((s, q) => s + q.avgServiceTimeSeconds, 0) / queuesWithServiceTime.length)
+  // Real historical comparison trends (only when enough historical comparison data exists)
+  const issuedTrend = yesterdayIssued > 0
+    ? Math.round(((metrics.issuedToday - yesterdayIssued) / yesterdayIssued) * 100)
+    : null;
+  const completedTrend = yesterdayServed > 0
+    ? Math.round(((metrics.completedToday - yesterdayServed) / yesterdayServed) * 100)
+    : null;
+  const yesterdayAvgWait = yesterdayWaitAgg[0]?.avgWaitSeconds ?? null;
+  const waitTrend = yesterdayAvgWait !== null && typeof avgWaitSeconds === 'number'
+    ? Math.round(((avgWaitSeconds - yesterdayAvgWait) / yesterdayAvgWait) * 100)
     : null;
 
+  // ── Service demand breakdown (real tokens requested today, grouped by service) ──
+  const serviceTokenAgg = await Token.aggregate([
+    {
+      $match: {
+        centerId: centerObjectId,
+        createdAt: { $gte: startOfDay, $lt: endOfDay },
+      },
+    },
+    {
+      $group: {
+        _id: '$serviceId',
+        total: { $sum: 1 },
+        completed: {
+          $sum: { $cond: [{ $eq: ['$status', 'COMPLETED'] }, 1, 0] },
+        },
+        waiting: {
+          $sum: { $cond: [{ $eq: ['$status', 'WAITING'] }, 1, 0] },
+        },
+      },
+    },
+  ]);
+
+  const serviceTokenMap = new Map();
+  for (const row of serviceTokenAgg) {
+    if (row._id) serviceTokenMap.set(row._id.toString(), row);
+  }
+
+  // ── Average Service Time per Service (real completed token lifecycle records) ──
+  const serviceDurationsAgg = await Token.aggregate([
+    {
+      $match: {
+        centerId: centerObjectId,
+        status: 'COMPLETED',
+        completedAt: { $gte: startOfDay, $lt: endOfDay },
+      },
+    },
+    {
+      $project: {
+        serviceId: 1,
+        serviceDurationSeconds: {
+          $cond: [
+            { $ne: ['$actualServiceSeconds', null] },
+            '$actualServiceSeconds',
+            {
+              $cond: [
+                { $and: [{ $ne: ['$completedAt', null] }, { $ne: ['$servingAt', null] }] },
+                { $divide: [{ $subtract: ['$completedAt', '$servingAt'] }, 1000] },
+                {
+                  $cond: [
+                    { $and: [{ $ne: ['$completedAt', null] }, { $ne: ['$calledAt', null] }] },
+                    { $divide: [{ $subtract: ['$completedAt', '$calledAt'] }, 1000] },
+                    null,
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    { $match: { serviceDurationSeconds: { $gt: 0 } } },
+    {
+      $group: {
+        _id: '$serviceId',
+        avgServiceTimeSeconds: { $avg: '$serviceDurationSeconds' },
+        totalServiceSeconds: { $sum: '$serviceDurationSeconds' },
+        completedCount: { $sum: 1 },
+      },
+    },
+  ]);
+
+  const serviceDurationMap = new Map();
+  let centerTotalServiceSeconds = 0;
+  let centerCompletedServiceSamples = 0;
+
+  for (const row of serviceDurationsAgg) {
+    if (row._id) {
+      serviceDurationMap.set(row._id.toString(), row);
+      centerTotalServiceSeconds += row.totalServiceSeconds;
+      centerCompletedServiceSamples += row.completedCount;
+    }
+  }
+
+  const avgServiceSeconds = centerCompletedServiceSamples > 0
+    ? Math.round(centerTotalServiceSeconds / centerCompletedServiceSamples)
+    : null;
+
+  // Build serviceDemand list dynamically using active services and actual token demand
+  const demandList = services.map((s) => {
+    const sId = s._id.toString();
+    const tokenData = serviceTokenMap.get(sId);
+    return {
+      serviceId: s._id,
+      name: s.name,
+      prefix: s.tokenPrefix || '?',
+      total: tokenData ? tokenData.total : 0,
+      completed: tokenData ? tokenData.completed : 0,
+      waiting: tokenData ? tokenData.waiting : 0,
+    };
+  });
+
+  // Include any other service referenced in today's tokens that might not be in active services
+  for (const [sId, row] of serviceTokenMap.entries()) {
+    if (!services.some((s) => s._id.toString() === sId)) {
+      const extraSvc = await Service.findById(sId).select('name tokenPrefix').lean();
+      demandList.push({
+        serviceId: sId,
+        name: extraSvc?.name || 'Other Service',
+        prefix: extraSvc?.tokenPrefix || '?',
+        total: row.total,
+        completed: row.completed,
+        waiting: row.waiting,
+      });
+    }
+  }
+
+  // Sort services: services with token demand first, then by name
+  demandList.sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
+
+  // Build queues status array with real service time and token counts
+  const queuesStatus = services.map((s) => {
+    const sId = s._id.toString();
+    const tokenData = serviceTokenMap.get(sId);
+    const durationData = serviceDurationMap.get(sId);
+    return {
+      service: {
+        _id: s._id,
+        name: s.name,
+        tokenPrefix: s.tokenPrefix,
+      },
+      status: s.isActive ? 'OPEN' : 'CLOSED',
+      waitingCount: tokenData ? tokenData.waiting : 0,
+      completedCount: durationData ? durationData.completedCount : (tokenData ? tokenData.completed : 0),
+      totalIssued: tokenData ? tokenData.total : 0,
+      avgServiceTimeSeconds: durationData ? Math.round(durationData.avgServiceTimeSeconds) : null,
+    };
+  });
+
+  // ── Counter utilization (operational activity scoped to selected center and date) ──
+  const counterTokenAgg = await Token.aggregate([
+    {
+      $match: {
+        centerId: centerObjectId,
+        counterId: { $ne: null },
+        $or: [
+          { completedAt: { $gte: startOfDay, $lt: endOfDay } },
+          { calledAt: { $gte: startOfDay, $lt: endOfDay } },
+          { status: { $in: ['CALLED', 'SERVING'] } },
+        ],
+      },
+    },
+    {
+      $project: {
+        counterId: 1,
+        status: 1,
+        actualServiceSeconds: {
+          $cond: [
+            { $ne: ['$actualServiceSeconds', null] },
+            '$actualServiceSeconds',
+            {
+              $cond: [
+                { $and: [{ $ne: ['$completedAt', null] }, { $ne: ['$servingAt', null] }] },
+                { $divide: [{ $subtract: ['$completedAt', '$servingAt'] }, 1000] },
+                {
+                  $cond: [
+                    { $and: [{ $ne: ['$completedAt', null] }, { $ne: ['$calledAt', null] }] },
+                    { $divide: [{ $subtract: ['$completedAt', '$calledAt'] }, 1000] },
+                    0,
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        earliestActivityTime: {
+          $ifNull: ['$servingAt', { $ifNull: ['$calledAt', '$createdAt'] }],
+        },
+      },
+    },
+    {
+      $group: {
+        _id: '$counterId',
+        served: {
+          $sum: { $cond: [{ $eq: ['$status', 'COMPLETED'] }, 1, 0] },
+        },
+        activeCount: {
+          $sum: { $cond: [{ $in: ['$status', ['CALLED', 'SERVING']] }, 1, 0] },
+        },
+        totalServiceSeconds: { $sum: '$actualServiceSeconds' },
+        earliestActivity: { $min: '$earliestActivityTime' },
+      },
+    },
+  ]);
+
+  const counterTokenMap = new Map();
+  for (const row of counterTokenAgg) {
+    if (row._id) counterTokenMap.set(row._id.toString(), row);
+  }
+
+  const counterUtil = counters.map((c) => {
+    const cId = c._id.toString();
+    const row = counterTokenMap.get(cId);
+
+    const served = row ? row.served : 0;
+    const activeCount = row ? row.activeCount : (c.currentTokenId ? 1 : 0);
+
+    // If currently serving a token, add live elapsed service seconds
+    let currentServingSeconds = 0;
+    if (c.currentTokenId) {
+      const serveStart = c.servingStartedAt || c.currentTokenId?.servingAt || c.currentTokenId?.calledAt || c.updatedAt;
+      if (serveStart) {
+        currentServingSeconds = Math.max(0, Math.round((now.getTime() - new Date(serveStart).getTime()) / 1000));
+      }
+    }
+
+    const totalServiceSeconds = (row ? row.totalServiceSeconds : 0) + currentServingSeconds;
+    const avgServiceSec = served > 0 ? Math.round(totalServiceSeconds / served) : null;
+
+    // Operational utilization calculation:
+    // If the counter is CLOSED and has zero operational activity/served tokens today, utilization is unavailable (null)
+    let utilizationPercent = null;
+    if (c.status === 'CLOSED' && served === 0 && activeCount === 0 && (!c.activeMinutesToday || c.activeMinutesToday === 0)) {
+      utilizationPercent = null;
+    } else {
+      // Counter is active or has operating history today
+      let operatingSeconds = 0;
+      if (c.activeMinutesToday && c.activeMinutesToday > 0) {
+        operatingSeconds = c.activeMinutesToday * 60;
+      } else if (row?.earliestActivity) {
+        operatingSeconds = Math.max(totalServiceSeconds, Math.round((now.getTime() - new Date(row.earliestActivity).getTime()) / 1000));
+      } else {
+        // Fallback operating time based on current activity
+        operatingSeconds = Math.max(totalServiceSeconds, 1);
+      }
+
+      if (operatingSeconds > 0) {
+        utilizationPercent = Math.min(100, Math.round((totalServiceSeconds / Math.max(totalServiceSeconds, operatingSeconds)) * 100));
+      } else {
+        utilizationPercent = 0;
+      }
+
+      // If counter was active and processed customers, ensure non-zero utilization
+      if (served > 0 && utilizationPercent === 0) {
+        utilizationPercent = 1;
+      }
+    }
+
+    return {
+      counterId: c._id,
+      name: c.name,
+      number: c.number,
+      status: c.status,
+      served,
+      utilizationPercent,
+      avgServiceSeconds: avgServiceSec,
+      currentToken: c.currentTokenId,
+      service: c.serviceId,
+    };
+  });
+
   // ── Footfall chart — hourly buckets for today ───────────────────────────────
-  const hourlyFootfall = await _getHourlyFootfall(centerId, date);
-
-  // ── Service demand — completed tokens by service ────────────────────────────
-  const serviceDemand = queues.map((q) => ({
-    serviceId: q.serviceId?._id,
-    name: q.serviceId?.name || 'Unknown',
-    prefix: q.serviceId?.tokenPrefix || '?',
-    completed: q.completedCount || 0,
-    waiting: q.waitingCount || 0,
-    total: q.totalIssued || 0,
-  }));
-
-  // ── Counter utilization ─────────────────────────────────────────────────────
-  const counterUtil = counters.map((c) => ({
-    counterId: c._id,
-    name: c.name,
-    number: c.number,
-    status: c.status,
-    served: c.stats?.served || 0,
-    utilizationPercent: c.utilizationPercent ?? 0,
-    avgServiceSeconds: c.stats?.avgServiceSeconds || null,
-    currentToken: c.currentTokenId,
-    service: c.serviceId,
-  }));
+  const hourlyFootfall = await _getHourlyFootfall(centerObjectId, startOfDay, endOfDay);
 
   // ── Ghost Queue Geofencing (Tier 4 / Feature 1) ──────────────────────────────
-  // Exposes aggregate counts only; zero customer PII or raw GPS coordinates
   const activeTokens = await Token.find({
-    centerId,
+    centerId: centerObjectId,
     status: { $in: ['WAITING', 'CALLED', 'SERVING'] },
   }).select('proximityState').lean();
 
@@ -139,38 +421,32 @@ const getDashboard = asyncHandler(async (req, res) => {
   return sendSuccess(res, {
     data: {
       summary: {
-        totalWaiting,
-        totalServed,
-        totalIssued,
+        totalWaiting: metrics.waitingCount,
+        totalServed: metrics.completedToday,
+        totalIssued: metrics.issuedToday,
         activeCounters,
         closedCounters,
         totalCounters: counters.length,
         ...crowd,
-        // ── Authoritative live stat-pill values (Token-derived, not day-partitioned) ──
+        // ── Authoritative live stat-pill values (Token-derived, scoped to today) ──
         waitingCount: metrics.waitingCount,
         servingCount: metrics.servingCount,
         completedToday: metrics.completedToday,
         issuedToday: metrics.issuedToday,
         waitSampleCount: metrics.waitSampleCount,
-        // Measured average WAIT time, or null when no customer has been called yet.
         avgWaitSeconds,
-        // Mean observed SERVICE duration, kept under its correct name.
         avgServiceSeconds,
+        trends: {
+          issuedTrend,
+          completedTrend,
+          waitTrend,
+        },
         ghostQueue,
       },
-      queues: queues.map((q) => ({
-        queueId: q._id,
-        service: q.serviceId,
-        status: q.status,
-        waitingCount: q.waitingCount,
-        completedCount: q.completedCount,
-        abandonedCount: q.abandonedCount,
-        totalIssued: q.totalIssued,
-        avgServiceTimeSeconds: q.avgServiceTimeSeconds,
-      })),
+      queues: queuesStatus,
       counters: counterUtil,
       hourlyFootfall,
-      serviceDemand,
+      serviceDemand: demandList,
       recommendations,
       ghostQueue,
     },
@@ -203,10 +479,6 @@ const getTokenTimeSeries = asyncHandler(async (req, res) => {
     if (!byHour[key]) byHour[key] = { hour: key, created: 0, completed: 0, cancelled: 0 };
     byHour[key].created++;
     if (token.status === 'COMPLETED') byHour[key].completed++;
-    // Phase 2: a customer auto-skipped for being outside the service area is a
-    // real abandonment, but it is a distinct cause from a voluntary cancel, a
-    // manual skip or a no-show. Counted in the existing `cancelled` total so the
-    // "created - completed" reconciliation still balances.
     if (['CANCELLED', 'SKIPPED', 'EXPIRED', 'SKIPPED_OUT_OF_RANGE'].includes(token.status)) {
       byHour[key].cancelled++;
     }
@@ -219,35 +491,50 @@ const getTokenTimeSeries = asyncHandler(async (req, res) => {
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
-async function _getHourlyFootfall(centerId, _date) {
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
+async function _getHourlyFootfall(centerId, startOfDay, endOfDay) {
+  if (!startOfDay || !endOfDay) {
+    const now = new Date();
+    startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+    endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
+  }
 
   const events = await FootfallEvent.find({
     centerId,
-    createdAt: { $gte: startOfDay },
+    createdAt: { $gte: startOfDay, $lt: endOfDay },
   })
     .sort({ createdAt: 1 })
     .lean();
+
+  if (!events || events.length === 0) {
+    return [];
+  }
 
   // Group by hour
   const byHour = {};
   for (const ev of events) {
     const hour = new Date(ev.createdAt).getHours();
-    if (!byHour[hour]) byHour[hour] = { hour, entries: 0, exits: 0, peakCount: 0 };
+    if (!byHour[hour]) {
+      byHour[hour] = { hour, count: 0, entries: 0, exits: 0, peakCount: 0, observations: 0 };
+    }
     if (ev.type === 'ENTRY') byHour[hour].entries++;
     if (ev.type === 'EXIT') byHour[hour].exits++;
+    if (ev.type === 'COUNT') byHour[hour].observations++;
     byHour[hour].peakCount = Math.max(byHour[hour].peakCount, ev.countAfter || 0);
   }
 
   return Object.entries(byHour)
     .sort(([a], [b]) => parseInt(a) - parseInt(b))
-    .map(([hour, data]) => ({
-      hour: `${String(hour).padStart(2, '0')}:00`,
-      entries: data.entries,
-      exits: data.exits,
-      peakCount: data.peakCount,
-    }));
+    .map(([hour, data]) => {
+      const count = data.entries > 0 ? data.entries : data.peakCount;
+      return {
+        hour: `${String(hour).padStart(2, '0')}:00`,
+        count,
+        entries: data.entries,
+        exits: data.exits,
+        peakCount: data.peakCount,
+        observations: data.observations,
+      };
+    });
 }
 
 /**

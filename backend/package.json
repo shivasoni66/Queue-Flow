@@ -40,6 +40,7 @@
     "test:live-metrics": "node test/live_metrics_realtime_regression.test.js",
     "test:profile": "node test/phase_profile_support_preferences.test.js",
     "test:allocation": "node test/phase_central_resource_allocation.test.js",
+    "test:analytics": "node test/analytics_operational.test.js",
     "test:all": "node test/smoke.test.js && node test/phase_profile_support_preferences.test.js && node test/live_metrics_realtime_regression.test.js && node test/phase_central_resource_allocation.test.js && node test/phase2_geofence_call_next.test.js && node test/location_queue_joining.test.js && node test/phase_tier4_ghost_queue.test.js && node test/phase_tier4_service_graph.test.js && node test/phase_tier4_p2p_swap.test.js && node test/phase_tier4_document_gate.test.js && node test/phase_tier4_workload_balancer.test.js && node test/phase_fcm_delivery.test.js",
     "seed": "node scripts/seed.js",
     "seed:clear": "node scripts/seed.js --clear"

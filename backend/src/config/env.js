@@ -18,6 +18,10 @@ const DEFAULT_ALLOWED_ORIGINS = [
   'http://127.0.0.1:5174',
   'http://127.0.0.1:5175',
   'https://queue-flow-4308.onrender.com',
+  'https://queueflow-customer.pages.dev',
+  'https://customer.shivasoni.me',
+  'https://admin.shivasoni.me',
+  'https://live.shivasoni.me',
 ];
 
 const BLACKLISTED_PLACEHOLDERS = [
