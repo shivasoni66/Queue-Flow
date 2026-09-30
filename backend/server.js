@@ -1,7 +1,20 @@
 'use strict';
 
 require('dotenv').config();
+const cors = require("cors");
+const express = require("express");
+const cors = require("cors");
 
+const app = express();
+app.use(cors({
+  origin: [
+    "http://127.0.0.1:5500",
+    "http://localhost:5500"
+  ],
+  credentials: true
+}));
+
+app.use(express.json());
 const { getConfig, ALLOWED_ORIGINS } = require('./src/config/env');
 const config = getConfig();
 
@@ -253,7 +266,7 @@ app.use((err, req, res, _next) => {
   if (status >= 400 && status < 500) {
     const safeMessage =
       process.env.NODE_ENV === 'production' &&
-      /mongodb|redis:\/\/|jwt|secret|password|\/.*\/|\\.*\\/i.test(err.message)
+        /mongodb|redis:\/\/|jwt|secret|password|\/.*\/|\\.*\\/i.test(err.message)
         ? 'Bad request'
         : err.message || 'Bad request';
     return res.status(status).json({
