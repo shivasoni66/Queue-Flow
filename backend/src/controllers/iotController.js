@@ -12,6 +12,7 @@ const { emitToCenter } = require('../config/socket');
 const { computeCrowdPercent, computeCrowdStatus } = require('../utils/crowdMetrics');
 const { verifyQRPayload } = require('../utils/qrSecurity');
 const { logger } = require('../utils/logger');
+const crypto = require('crypto');
 
 // ─── Validation ───────────────────────────────────
 const rfidValidation = [
@@ -36,6 +37,11 @@ const scanQRValidation = [
     .optional()
     .isMongoId()
     .withMessage('centerId must be a valid MongoId'),
+];
+
+const assistedTokenValidation = [
+  body('centerId').isMongoId().withMessage('Valid centerId is required'),
+  body('serviceId').isMongoId().withMessage('Valid serviceId is required'),
 ];
 
 // ─── IoT Controllers ──────────────────────────────
@@ -162,6 +168,66 @@ const handleCrowd = asyncHandler(async (req, res) => {
 });
 
 /**
+ * POST /api/iot/assisted-token
+ * Generate a token for a person using the physical/assisted IoT kiosk.
+ * Auth: x-iot-secret header
+ *
+ * This reuses the existing queueService.joinQueue() engine so the
+ * assisted person enters the same queue as normal mobile/web users.
+ */
+const createAssistedToken = asyncHandler(async (req, res) => {
+  const { centerId, serviceId } = req.body;
+
+  // Create a unique temporary customer identity.
+  // Token model currently requires a real User reference.
+  const uniqueId = crypto.randomUUID();
+
+  const email = `assisted-${uniqueId}@queueflow.local`;
+
+  const passwordHash = await User.hashPassword(
+    crypto.randomBytes(32).toString('hex')
+  );
+
+  const assistedUser = await User.create({
+    name: 'Assisted Visitor',
+    email,
+    passwordHash,
+    role: 'CUSTOMER',
+    isActive: true,
+    preferences: {
+      notifyApp: false,
+      notifySms: false,
+      notifyAheadCount: 5,
+      language: 'en',
+    },
+  });
+
+  const { token, queue } = await queueService.joinQueue({
+    userId: assistedUser._id.toString(),
+    centerId,
+    serviceId,
+    notifyApp: false,
+    notifySms: false,
+    channel: 'ASSISTED',
+    channelMetadata: {
+      externalUserId: `iot-assisted-${uniqueId}`,
+    },
+  });
+
+  return sendSuccess(res, {
+    message: 'Assisted token generated successfully',
+    data: {
+      token,
+      queue: {
+        waitingCount: queue.waitingCount,
+        totalIssued: queue.totalIssued,
+        avgServiceTimeSeconds: queue.avgServiceTimeSeconds,
+      },
+    },
+  });
+});
+
+/**
  * POST /api/iot/scan-qr
  * Physical scanner (ESP32 or kiosk) submits a scanned QR payload for verification.
  * Auth: x-iot-secret header (shared device secret — never embedded in Flutter app).
@@ -234,4 +300,13 @@ const scanQR = asyncHandler(async (req, res) => {
   });
 });
 
-module.exports = { handleRfid, handleCrowd, scanQR, rfidValidation, crowdValidation, scanQRValidation };
+module.exports = {
+  handleRfid,
+  handleCrowd,
+  scanQR,
+  createAssistedToken,
+  rfidValidation,
+  crowdValidation,
+  scanQRValidation,
+  assistedTokenValidation,
+};

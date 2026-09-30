@@ -109,7 +109,15 @@ const tokenSchema = new mongoose.Schema(
     // Intake channel attribution (Phase D)
     channel: {
       type: String,
-      enum: ['WEB', 'MOBILE', 'QR', 'WHATSAPP', 'SMS', 'TELEGRAM'],
+      enum: [
+        'WEB',
+        'MOBILE',
+        'QR',
+        'WHATSAPP',
+        'SMS',
+        'TELEGRAM',
+        'ASSISTED'
+      ],
       default: 'WEB',
     },
     channelMetadata: {
