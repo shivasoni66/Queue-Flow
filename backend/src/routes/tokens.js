@@ -11,6 +11,7 @@ const {
 } = require('../middleware/rateLimiter');
 const {
   create,
+  createKioskToken,
   getMyTokens,
   getActiveToken,
   getById,
@@ -21,10 +22,18 @@ const {
   updateLocation,
   getProximity,
   joinValidation,
+  kioskTokenValidation,
   feedbackValidation,
   verifyQRValidation,
   locationValidation,
 } = require('../controllers/tokenController');
+
+// ─── Dedicated Physical Kiosk / Assisted Token Routes ────────────────────────
+// Server-authoritative token creation for physical counter kiosks & walk-ins.
+// Authenticated via Kiosk displayToken, staff/admin JWT, or hardware IoT secret.
+console.log('[KIOSK ROUTE] /api/tokens/kiosk loaded');
+router.post('/kiosk', tokenCreateLimiter, kioskTokenValidation, validate, createKioskToken);
+router.post('/assisted', tokenCreateLimiter, kioskTokenValidation, validate, createKioskToken);
 
 // All standard token routes require customer/staff/admin authentication
 router.use(protect);
