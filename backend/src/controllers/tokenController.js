@@ -8,6 +8,11 @@ const { generateQRCodeImage } = require('../utils/tokenUtils');
 const { verifyQRPayload, QR_TTL_SECONDS } = require('../utils/qrSecurity');
 const asyncHandler = require('../utils/asyncHandler');
 const { logger } = require('../utils/logger');
+const jwt = require('jsonwebtoken');
+const ServiceCenter = require('../models/ServiceCenter');
+const Service = require('../models/Service');
+const Counter = require('../models/Counter');
+const User = require('../models/User');
 const {
   sendSuccess,
   sendCreated,
@@ -15,9 +20,16 @@ const {
   sendBadRequest,
   sendConflict,
   sendUnauthorized,
+  sendForbidden,
 } = require('../utils/apiResponse');
 
 // ─── Validation ───────────────────────────────────────────────────────────────
+const kioskTokenValidation = [
+  body('centerId').isMongoId().withMessage('Valid centerId is required'),
+  body('serviceId').isMongoId().withMessage('Valid serviceId is required'),
+  body('counterId').optional({ nullable: true }).isMongoId().withMessage('Invalid counterId format'),
+];
+
 const joinValidation = [
   body('centerId').isMongoId().withMessage('Valid centerId is required'),
   body('serviceId').isMongoId().withMessage('Valid serviceId is required'),
@@ -132,6 +144,13 @@ const create = asyncHandler(async (req, res) => {
         success: false,
         code: err.code,
         message: err.message,
+      });
+    }
+    if (err.code === 'DAILY_TOKEN_LIMIT_REACHED' || err.status === 429) {
+      return res.status(429).json({
+        success: false,
+        code: 'DAILY_TOKEN_LIMIT_REACHED',
+        message: err.message || 'Daily token limit has been reached for this service today.',
       });
     }
     if (err.code === 'DOCUMENT_GATE_BLOCKED' || (err.status === 403 && err.gateData)) {
@@ -530,8 +549,162 @@ const getProximity = asyncHandler(async (req, res) => {
   });
 });
 
+/**
+ * POST /api/tokens/kiosk
+ * POST /api/tokens/assisted
+ * Dedicated physical offline counter kiosk / assisted token creation.
+ * Server-authoritative token creation for walk-in and elderly customers.
+ * Auth: Bearer <displayToken> OR Bearer <userToken> OR x-iot-secret header.
+ */
+const createKioskToken = asyncHandler(async (req, res) => {
+  const { centerId, serviceId, counterId } = req.body;
+
+  // 1. Authenticate caller (display token, user JWT, or IoT secret)
+  let authorized = false;
+  let authCenterId = null;
+
+  // Check IoT secret header (for physical hardware devices)
+  const iotSecretHeader = req.headers['x-iot-secret'];
+  if (iotSecretHeader && process.env.IOT_SECRET && iotSecretHeader === process.env.IOT_SECRET) {
+    authorized = true;
+  }
+
+  // Check Bearer JWT token (from Kiosk display session or Staff/Admin)
+  if (!authorized && req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+    const rawToken = req.headers.authorization.split(' ')[1];
+    try {
+      const decoded = jwt.verify(rawToken, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+      if (decoded.isDisplay) {
+        authorized = true;
+        authCenterId = decoded.id || decoded.centerId;
+      } else if (decoded.role === 'STAFF' || decoded.role === 'ADMIN' || decoded.role === 'CUSTOMER') {
+        authorized = true;
+        authCenterId = decoded.centerId || null;
+      }
+    } catch (_) {
+      // Invalid signature or expired
+    }
+  }
+
+  if (!authorized) {
+    return sendUnauthorized(res, 'Kiosk authorization required to issue assisted tokens');
+  }
+
+  // If token is bound to a specific center (e.g. display token for Center A), verify match
+  if (authCenterId && authCenterId.toString() !== centerId.toString()) {
+    return sendForbidden(res, 'Kiosk is not authorized to issue tokens for a different service center');
+  }
+
+  // 2. Authoritative facility & service checks
+  const center = await ServiceCenter.findById(centerId);
+  if (!center) {
+    return sendNotFound(res, 'Service center not found');
+  }
+
+  if (!center.isOpen) {
+    return sendBadRequest(res, 'Service center is currently closed');
+  }
+
+  const service = await Service.findById(serviceId);
+  if (!service) {
+    return sendNotFound(res, 'Service not found');
+  }
+
+  if (service.centerId.toString() !== centerId.toString()) {
+    return sendBadRequest(res, 'The requested service does not belong to this service center');
+  }
+
+  if (!service.isActive) {
+    return sendBadRequest(res, 'Service is not currently available');
+  }
+
+  if (counterId) {
+    const counter = await Counter.findOne({ _id: counterId, centerId });
+    if (!counter) {
+      return sendBadRequest(res, 'Counter not found or does not belong to this service center');
+    }
+  }
+
+  // 3. Create a unique on-premise walk-in guest user
+  // This satisfies Token's required userId while ensuring consecutive walk-in customers
+  // do not collide on active tokens
+  const walkinEmail = `walkin.${centerId}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}@kiosk.queueflow.dev`;
+  const walkinUser = await User.create({
+    name: 'Walk-in Customer',
+    email: walkinEmail,
+    role: 'CUSTOMER',
+    passwordHash: 'KIOSK_WALKIN_GUEST',
+    isActive: true,
+  });
+
+  // 4. Physical Kiosk location resolution
+  // The physical kiosk is installed inside the service center facility.
+  const centerLat = center.latitude !== undefined && center.latitude !== null
+    ? center.latitude
+    : (center.location ? center.location.latitude : null);
+  const centerLng = center.longitude !== undefined && center.longitude !== null
+    ? center.longitude
+    : (center.location ? center.location.longitude : null);
+
+  // 5. Authoritative queue joining
+  try {
+    const { token, queue } = await queueService.joinQueue({
+      userId: walkinUser._id.toString(),
+      centerId,
+      serviceId,
+      notifyApp: false,
+      notifySms: false,
+      channel: 'WEB',
+      channelMetadata: {
+        isKiosk: true,
+        counterId: counterId || null,
+        intakeType: 'OFFLINE_COUNTER_KIOSK',
+      },
+      latitude: centerLat !== null ? centerLat : undefined,
+      longitude: centerLng !== null ? centerLng : undefined,
+      accuracy: 5,
+      timestamp: new Date().toISOString(),
+    });
+
+    const populatedToken = await Token.findById(token._id)
+      .populate('centerId', 'name code address')
+      .populate('serviceId', 'name tokenPrefix')
+      .populate('counterId', 'name number')
+      .lean();
+
+    return sendCreated(res, {
+      message: 'Token generated successfully',
+      data: {
+        token: populatedToken || token,
+        queue: {
+          waitingCount: queue.waitingCount,
+          totalIssued: queue.totalIssued,
+          avgServiceTimeSeconds: queue.avgServiceTimeSeconds,
+        },
+      },
+    });
+  } catch (err) {
+    if (err.code === 'DAILY_TOKEN_LIMIT_REACHED' || err.status === 429) {
+      return res.status(429).json({
+        success: false,
+        code: 'DAILY_TOKEN_LIMIT_REACHED',
+        message: err.message || 'Daily token limit reached for this service today',
+      });
+    }
+    if (err.status) {
+      return res.status(err.status).json({
+        success: false,
+        code: err.code || 'TOKEN_CREATION_FAILED',
+        message: err.message,
+      });
+    }
+    throw err;
+  }
+});
+
 module.exports = {
   create,
+  createKioskToken,
   getMyTokens,
   getActiveToken,
   getById,
@@ -542,6 +715,7 @@ module.exports = {
   updateLocation,
   getProximity,
   joinValidation,
+  kioskTokenValidation,
   feedbackValidation,
   verifyQRValidation,
   locationValidation,
