@@ -116,8 +116,12 @@ export const tokenAPI = {
    * Authoritative token generation request.
    * Client NEVER generates token number locally.
    */
-  joinQueue: (centerId, serviceId) => 
-    api.post('/tokens', { centerId, serviceId }),
+  joinQueue: (centerId, serviceId, locationData = {}) => 
+    api.post('/tokens', {
+      centerId,
+      serviceId,
+      ...(locationData && typeof locationData === 'object' ? locationData : {}),
+    }),
   getActive: () => 
     api.get('/tokens/active'),
   getById: (id) => 

@@ -58,7 +58,7 @@ export function QueuePreviewPage() {
         queueAPI.getServiceQueue(centerId, serviceId),
       ]);
 
-      const centerPayload = cRes.data?.serviceCenter || cRes.data || null;
+      const centerPayload = cRes.data?.center || cRes.data?.serviceCenter || cRes.data || null;
       const servicePayload = sRes.data?.service || sRes.data || null;
       const qPayload = qRes.data?.queue || qRes.data || null;
       const waitMins = typeof qRes.data?.estimatedWaitMinutes === 'number' ? qRes.data.estimatedWaitMinutes : null;
@@ -139,8 +139,51 @@ export function QueuePreviewPage() {
         return;
       }
 
+      // Check if service center requires location / geofence verification
+      const centerLat = center?.latitude ?? center?.location?.latitude ?? null;
+      const centerLng = center?.longitude ?? center?.location?.longitude ?? null;
+      const requiresLocation = centerLat !== null && centerLng !== null;
+
+      let locationData = {};
+      if (requiresLocation) {
+        if (typeof window !== 'undefined' && !navigator?.geolocation) {
+          setJoinError('Geolocation is not supported by your browser or connection. You must share your location to join this service center queue.');
+          setJoining(false);
+          return;
+        }
+
+        try {
+          const position = await new Promise((resolve, reject) => {
+            navigator.geolocation.getCurrentPosition(resolve, reject, {
+              enableHighAccuracy: true,
+              timeout: 10000,
+              maximumAge: 30000,
+            });
+          });
+
+          locationData = {
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+            accuracy: position.coords.accuracy,
+            timestamp: new Date(position.timestamp || Date.now()).toISOString(),
+          };
+        } catch (geoErr) {
+          setJoining(false);
+          if (geoErr.code === 1) { // PERMISSION_DENIED
+            setJoinError('Location access was denied. You must allow location access in your browser to join the queue at this service center.');
+          } else if (geoErr.code === 2) { // POSITION_UNAVAILABLE
+            setJoinError('Unable to determine your device location. Please ensure location/GPS is enabled.');
+          } else if (geoErr.code === 3) { // TIMEOUT
+            setJoinError('Location request timed out. Please try again.');
+          } else {
+            setJoinError(geoErr.message || 'Location verification is required to join this queue.');
+          }
+          return;
+        }
+      }
+
       // Server-authoritative token creation
-      const res = await tokenAPI.joinQueue(centerId, serviceId);
+      const res = await tokenAPI.joinQueue(centerId, serviceId, locationData);
       const createdToken = res.data?.token;
 
       if (!createdToken?._id) {
@@ -150,11 +193,21 @@ export function QueuePreviewPage() {
       await refreshActiveToken();
       navigate(`/token/${createdToken._id}`);
     } catch (err) {
-      if (err.data?.code === 'DOCUMENT_GATE_BLOCKED' || err.status === 403) {
+      if (
+        err.data?.code === 'OUT_OF_RANGE' ||
+        err.data?.code === 'LOCATION_REQUIRED' ||
+        err.data?.code === 'LOCATION_UNCERTAIN' ||
+        err.data?.code === 'LOCATION_STALE' ||
+        err.data?.code === 'INVALID_COORDINATES'
+      ) {
+        setJoinError(
+          err.message || 'You must be within the service center area to join the queue.'
+        );
+      } else if (err.data?.code === 'DOCUMENT_GATE_BLOCKED' || err.status === 403) {
         setJoinError(
           err.message || 'Service requires document verification before joining queue'
         );
-      } else if (err.status === 409) {
+      } else if (err.data?.code === 'ACTIVE_TOKEN_EXISTS' || err.status === 409) {
         setJoinError(
           err.message || 'You already have an active token for this service at this center.'
         );

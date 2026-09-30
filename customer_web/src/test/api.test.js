@@ -38,6 +38,34 @@ describe('Customer API & Authoritative Token Security (Requirements 7, 8, 9, 16)
     expect(payload.status).toBeUndefined();
   });
 
+  it('joinQueue passes device coordinates when locationData is provided', async () => {
+    const postSpy = vi.spyOn(api, 'post').mockResolvedValueOnce({
+      status: 'success',
+      data: { token: { _id: 'token_geo_1', tokenCode: 'A002' } },
+    });
+
+    const locationData = {
+      latitude: 23.182997,
+      longitude: 77.30138,
+      accuracy: 15,
+      timestamp: '2026-09-30T12:00:00.000Z',
+    };
+
+    await tokenAPI.joinQueue('center_1', 'service_1', locationData);
+
+    expect(postSpy).toHaveBeenCalledTimes(1);
+    const [endpoint, payload] = postSpy.mock.calls[0];
+    expect(endpoint).toBe('/tokens');
+    expect(payload).toEqual({
+      centerId: 'center_1',
+      serviceId: 'service_1',
+      latitude: 23.182997,
+      longitude: 77.30138,
+      accuracy: 15,
+      timestamp: '2026-09-30T12:00:00.000Z',
+    });
+  });
+
   it('Requirement 8: receives authoritative token from backend response', async () => {
     const mockToken = {
       _id: 'token_abc123',
